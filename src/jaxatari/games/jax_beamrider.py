@@ -31,6 +31,17 @@ class WhiteUFOPattern(IntEnum):
     KAMIKAZE = 7
 
 
+class EnemyType(IntEnum):
+    WHITE_UFO = 0
+    BOUNCER = 1
+
+
+class BouncerState(IntEnum):
+    SWITCHING = 0 # Also used for Entry
+    DOWN = 1
+    UP = 2
+
+
 class BeamriderConstants(NamedTuple):
     RENDER_SCALE_FACTOR: int = 4
     SCREEN_WIDTH: int = 160
@@ -86,6 +97,13 @@ class BeamriderConstants(NamedTuple):
     ENEMY_EXPLOSION_FRAMES: int = 21
     KAMIKAZE_Y_THRESHOLD: float = 86.0
 
+    # Bouncer Constants
+    BOUNCER_SPAWN_HEIGHT: float = 75.0
+    BOUNCER_START_LEVEL: int = 8
+    BOUNCER_SPEED_PATTERN: Tuple[int, int, int, int] = (0, 3, 0, 3)
+    BOUNCER_SWITCH_SPEED_X: float = 1.2
+    BOUNCER_SWITCH_SPEED_Y: float = 1.0
+
     # Mothership Explosion
     # Sequence: 1, 2, 1, 2, 3, 2, 3, 2, 3 (indices 0, 1, 0, 1, 2, 1, 2, 1, 2)
     # 8 frames per sprite step -> total 9 steps * 8 frames = 72 frames
@@ -96,7 +114,7 @@ class BeamriderConstants(NamedTuple):
     # Blue line constants
     BLUE_LINE_OFFSCREEN_Y = 500
 
-    WHITE_UFOS_PER_SECTOR: int = 1
+    WHITE_UFOS_PER_SECTOR: int = 15
     CHASING_METEOROID_MAX: int = 8
     CHASING_METEOROID_WAVE_MIN: int = 2
     CHASING_METEOROID_WAVE_MAX: int = 8
@@ -111,10 +129,6 @@ class BeamriderConstants(NamedTuple):
     MOTHERSHIP_ANIM_X: Tuple[int, int, int, int, int, int, int] = (9, 9, 10, 10, 11, 12, 12)
     MOTHERSHIP_HEIGHT: int = 7
     MOTHERSHIP_EMERGE_Y: int = 44
-    REJUVENATOR_SPAWN_PROB: float = 1/1500
-    REJUVENATOR_STAGE_2_Y: float = 57.0
-    REJUVENATOR_STAGE_3_Y: float = 69.0
-    REJUVENATOR_STAGE_4_Y: float = 86.0
     DEATH_DURATION: int = 120
 
 
@@ -127,14 +141,6 @@ def _get_index_ufo(pos: chex.Array) -> chex.Array:
     stage_6 = (pos >= 86).astype(jnp.int32)  # ab hier werden die schneller
     stage_7 = (pos >= 121).astype(jnp.int32)
     return stage_1 + stage_2 + stage_3 + stage_4 + stage_5 + stage_6 + stage_7
-
-
-def _get_index_rejuvenator(pos: chex.Array) -> chex.Array:
-    stage_1 = (pos >= 0).astype(jnp.int32)
-    stage_2 = (pos >= 57).astype(jnp.int32)
-    stage_3 = (pos >= 69).astype(jnp.int32)
-    stage_4 = (pos >= 86).astype(jnp.int32)
-    return stage_1 + stage_2 + stage_3 + stage_4
 
 
 def _get_ufo_alignment(pos: chex.Array) -> chex.Array:
@@ -204,12 +210,6 @@ class LevelState(NamedTuple):
     chasing_meteoroid_remaining: chex.Array
     chasing_meteoroid_wave_active: chex.Array
 
-    rejuvenator_pos: chex.Array
-    rejuvenator_active: chex.Array
-    rejuvenator_dead: chex.Array
-    rejuvenator_frame: chex.Array
-    rejuvenator_lane: chex.Array
-
     line_positions: chex.Array
     blue_line_counter: chex.Array
     
@@ -256,6 +256,7 @@ class WhiteUFOUpdate(NamedTuple):
     attack_time: chex.Array
     pattern_id: chex.Array
     pattern_timer: chex.Array
+    enemy_type: chex.Array
 
 
 class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, BeamriderInfo, BeamriderConstants]):
@@ -287,7 +288,9 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
     
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, key=None) -> Tuple[BeamriderObservation, BeamriderState]:
-        state = self.reset_level(1)
+        if key is None:
+            key = jax.random.PRNGKey(42)
+        state = self.reset_level(8, key=key)
         observation = self._get_observation(state)
         return observation, state
 
@@ -343,17 +346,14 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             chasing_meteoroid_spawn_timer=jnp.array(0, dtype=jnp.int32),
             chasing_meteoroid_remaining=jnp.array(0, dtype=jnp.int32),
             chasing_meteoroid_wave_active=jnp.array(False),
-            rejuvenator_pos=jnp.array(self.consts.ENEMY_OFFSCREEN_POS, dtype=jnp.float32),
-            rejuvenator_active=jnp.array(False),
-            rejuvenator_dead=jnp.array(False),
-            rejuvenator_frame=jnp.array(0, dtype=jnp.int32),
-            rejuvenator_lane=jnp.array(0, dtype=jnp.int32),
             line_positions=BLUE_LINE_INIT_TABLE[0],
             blue_line_counter=jnp.array(0, dtype=jnp.int32),
             death_timer=jnp.array(0, dtype=jnp.int32),
         )
 
-    def reset_level(self, next_level=1) -> BeamriderState:
+    def reset_level(self, next_level=1, key=None) -> BeamriderState:
+        if key is None:
+            key = jax.random.PRNGKey(42)
         level_state = self._create_level_state()
         
         return BeamriderState(
@@ -364,7 +364,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             reset_coords=jnp.array(False),
             lives=jnp.array(3),
             steps=jnp.array(0),
-            rng=jnp.array(jax.random.key(42)),
+            rng=jnp.array(key),
         )
     
 
@@ -420,13 +420,12 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
                 shooting_cooldown,
             ) = self._player_step(state, action)
 
-            rngs = jax.random.split(state.rng, 6)
+            rngs = jax.random.split(state.rng, 5)
             next_rng = rngs[0]
             ufo_keys = rngs[1:4]
             meteoroid_key = rngs[4]
-            rejuvenator_key = rngs[5]
 
-            ufo_update = self._advance_white_ufos(state, ufo_keys)
+            ufo_update = self._advance_enemies(state, ufo_keys)
             (
                 white_ufo_pos,
                 player_shot_position,
@@ -435,6 +434,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
                 white_ufo_left,
                 score,
                 hit_mask,
+                enemy_type_after_collision,
             ) = self._collision_handler(
                 state,
                 ufo_update.pos,
@@ -442,6 +442,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
                 bullet_type,
                 ufo_update.pattern_id,
                 ufo_update.pattern_timer,
+                ufo_update.enemy_type,
             )
 
             (
@@ -475,37 +476,6 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
                 player_shot_position,
                 bullet_type,
             )
-            
-            (
-                rejuv_pos,
-                rejuv_active,
-                rejuv_dead,
-                rejuv_frame,
-                rejuv_lane,
-            ) = self._rejuvenator_step(state, rejuvenator_key)
-            
-            # Rejuvenator-Shot collision
-            rejuv_x_screen = rejuv_pos[0] + _get_ufo_alignment(rejuv_pos[1])
-            rejuv_y = rejuv_pos[1]
-            shot_x_screen = player_shot_position[0] + _get_bullet_alignment(player_shot_position[1], bullet_type, self.consts.LASER_ID)
-            shot_y = player_shot_position[1]
-            
-            rejuv_shot_dist_x = jnp.abs(rejuv_x_screen - shot_x_screen)
-            rejuv_shot_dist_y = jnp.abs(rejuv_y - shot_y)
-            
-            is_laser = bullet_type == self.consts.LASER_ID
-            bullet_radius = jnp.where(is_laser, jnp.array(self.consts.LASER_HIT_RADIUS), jnp.array(self.consts.TORPEDO_HIT_RADIUS))
-            
-            rejuv_hit_by_shot = jnp.logical_and.reduce(jnp.array([
-                rejuv_active,
-                jnp.logical_not(rejuv_dead),
-                rejuv_shot_dist_x <= bullet_radius[0] + 2.0,
-                rejuv_shot_dist_y <= bullet_radius[1] + 2.0,
-                shot_y < self.consts.BOTTOM_CLIP
-            ]))
-            
-            rejuv_dead = jnp.logical_or(rejuv_dead, rejuv_hit_by_shot)
-            player_shot_position = jnp.where(rejuv_hit_by_shot, jnp.array(self.consts.BULLET_OFFSCREEN_POS), player_shot_position)
 
             # --- Mothership Collision Check ---
             ms_stage = state.level.mothership_stage
@@ -579,20 +549,6 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             ]))
             chasing_meteoroid_hit_count = jnp.sum(chasing_meteoroid_hits.astype(jnp.int32))
             
-            rejuv_hit_player = jnp.logical_and.reduce(jnp.array([
-                rejuv_active,
-                rejuv_y >= player_y - 4.0,
-                rejuv_y <= player_y + 10.0,
-                rejuv_x_screen >= player_left - 2.0,
-                rejuv_x_screen <= player_right + 2.0,
-            ]))
-            
-            gain_life = jnp.logical_and(rejuv_hit_player, jnp.logical_not(rejuv_dead))
-            lose_life_rejuv = jnp.logical_and(rejuv_hit_player, rejuv_dead)
-            
-            rejuv_active = jnp.where(rejuv_hit_player, False, rejuv_active)
-            rejuv_pos = jnp.where(rejuv_hit_player[None], jnp.array(self.consts.ENEMY_OFFSCREEN_POS), rejuv_pos)
-
             chasing_meteoroid_offscreen = jnp.tile(
                 jnp.array(self.consts.ENEMY_OFFSCREEN_POS, dtype=chasing_meteoroid_pos.dtype).reshape(2, 1),
                 (1, self.consts.CHASING_METEOROID_MAX),
@@ -614,7 +570,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             chasing_meteoroid_lane = jnp.where(reached_player, 0, chasing_meteoroid_lane)
             chasing_meteoroid_side = jnp.where(reached_player, 1, chasing_meteoroid_side)
 
-            hit_count = shot_hit_count + ufo_hit_count + chasing_meteoroid_hit_count + lose_life_rejuv.astype(jnp.int32)
+            hit_count = shot_hit_count + ufo_hit_count + chasing_meteoroid_hit_count
 
             current_death_timer = state.level.death_timer
             is_hit = hit_count > 0
@@ -654,6 +610,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             white_ufo_attack_time = jnp.where(active_mask, white_ufo_attack_time, 0)
             white_ufo_pattern_id = jnp.where(active_mask, white_ufo_pattern_id, int(WhiteUFOPattern.IDLE))
             white_ufo_pattern_timer = jnp.where(active_mask, white_ufo_pattern_timer, 0)
+            enemy_type = jnp.where(active_mask, enemy_type_after_collision, int(EnemyType.WHITE_UFO))
 
             enemy_shot_offscreen = jnp.tile(jnp.array(self.consts.BULLET_OFFSCREEN_POS, dtype=enemy_shot_pos.dtype).reshape(2, 1), (1, 3))
             enemy_shot_pos = jnp.where(active_mask[None, :], enemy_shot_pos, enemy_shot_offscreen)
@@ -672,12 +629,6 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             chasing_meteoroid_spawn_timer = jnp.where(sector_advanced, 0, chasing_meteoroid_spawn_timer)
             chasing_meteoroid_remaining = jnp.where(sector_advanced, 0, chasing_meteoroid_remaining)
             chasing_meteoroid_wave_active = jnp.where(sector_advanced, False, chasing_meteoroid_wave_active)
-            
-            rejuv_pos = jnp.where(sector_advanced, jnp.array(self.consts.ENEMY_OFFSCREEN_POS), rejuv_pos)
-            rejuv_active = jnp.where(sector_advanced, False, rejuv_active)
-            rejuv_dead = jnp.where(sector_advanced, False, rejuv_dead)
-            rejuv_frame = jnp.where(sector_advanced, 0, rejuv_frame)
-            rejuv_lane = jnp.where(sector_advanced, 0, rejuv_lane)
 
             white_ufo_pos = jnp.where(is_dying_sequence, ufo_offscreen, white_ufo_pos)
             enemy_shot_pos = jnp.where(is_dying_sequence, enemy_shot_offscreen, enemy_shot_pos)
@@ -690,13 +641,6 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             chasing_meteoroid_spawn_timer = jnp.where(is_dying_sequence, 0, chasing_meteoroid_spawn_timer)
             chasing_meteoroid_remaining = jnp.where(is_dying_sequence, 0, chasing_meteoroid_remaining)
             chasing_meteoroid_wave_active = jnp.where(is_dying_sequence, False, chasing_meteoroid_wave_active)
-            
-            rejuv_pos = jnp.where(is_dying_sequence, jnp.array(self.consts.ENEMY_OFFSCREEN_POS), rejuv_pos)
-            rejuv_active = jnp.where(is_dying_sequence, False, rejuv_active)
-            rejuv_dead = jnp.where(is_dying_sequence, False, rejuv_dead)
-            rejuv_frame = jnp.where(is_dying_sequence, 0, rejuv_frame)
-            rejuv_lane = jnp.where(is_dying_sequence, 0, rejuv_lane)
-
             mothership_position = jnp.where(is_dying_sequence, self.consts.MOTHERSHIP_OFFSCREEN_POS, mothership_position)
             mothership_timer = jnp.where(is_dying_sequence, 0, mothership_timer)
             mothership_stage = jnp.where(is_dying_sequence, 0, mothership_stage)
@@ -710,7 +654,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
                 mothership_stage=mothership_stage, player_shot_pos=player_shot_position,
                 player_shot_vel=player_shot_velocity, torpedoes_left=torpedos_left,
                 shooting_cooldown=shooting_cooldown, bullet_type=bullet_type,
-                enemy_type=jnp.array([0, 0, 0]), white_ufo_pos=white_ufo_pos,
+                enemy_type=enemy_type, white_ufo_pos=white_ufo_pos,
                 white_ufo_vel=white_ufo_vel, enemy_shot_pos=enemy_shot_pos,
                 enemy_shot_vel=enemy_shot_lane, enemy_shot_timer=enemy_shot_timer,
                 white_ufo_time_on_lane=white_ufo_time_on_lane, white_ufo_attack_time=white_ufo_attack_time,
@@ -724,9 +668,6 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
                 chasing_meteoroid_spawn_timer=chasing_meteoroid_spawn_timer,
                 chasing_meteoroid_remaining=chasing_meteoroid_remaining,
                 chasing_meteoroid_wave_active=chasing_meteoroid_wave_active,
-                rejuvenator_pos=rejuv_pos, rejuvenator_active=rejuv_active,
-                rejuvenator_dead=rejuv_dead, rejuvenator_frame=rejuv_frame,
-                rejuvenator_lane=rejuv_lane,
                 line_positions=line_positions, blue_line_counter=blue_line_counter,
                 death_timer=next_death_timer,
             )
@@ -736,9 +677,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
                 lambda normal, reset: jnp.where(jnp.logical_or(just_died, sector_advanced), reset, normal),
                 new_level_state, reset_level_state
             )
-            
-            lives_after_gain = state.lives + gain_life.astype(jnp.int32)
-            new_lives = jnp.where(just_died, jnp.maximum(lives_after_gain - 1, 0), lives_after_gain)
+            new_lives = jnp.where(just_died, jnp.maximum(state.lives - 1, 0), state.lives)
 
             new_state = BeamriderState(
                 level=final_level_state, score=score, sector=sector,
@@ -879,6 +818,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
         new_bullet_type: chex.Array,
         current_patterns: chex.Array,
         current_timers: chex.Array,
+        current_types: chex.Array,
     ):
         enemies_raw = new_white_ufo_pos.T
 
@@ -901,17 +841,27 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
         )
         distance_bullet_radius = distance_to_bullet - bullet_radius
         hit_mask = jnp.array((distance_bullet_radius[:, 0] <= 0) & (distance_bullet_radius[:, 1] <= 0))
-        hit_index = jnp.argmax(hit_mask)
-        hit_exists = jnp.any(hit_mask)
-        enemy_pos_after_hit = enemies_raw.at[hit_index].set(
-            jnp.array([77.0, 43.0], dtype=enemies_raw.dtype)
-        ).T
+        
+        # Bouncers can only be destroyed by Torpedoes
+        is_bouncer_hit = hit_mask & (current_types == int(EnemyType.BOUNCER))
+        can_destroy = jnp.logical_not(is_bouncer_hit & bullet_type_is_laser)
+        
+        effective_hit_mask = hit_mask & can_destroy
+        hit_exists = jnp.any(effective_hit_mask)
+        
+        # Any contact (even if not destroyed, like laser hitting bouncer) makes the shot disappear
+        any_hit_exists = jnp.any(hit_mask)
+        
+        hit_index = jnp.argmax(effective_hit_mask)
+        offscreen_pos = jnp.array(self.consts.ENEMY_OFFSCREEN_POS, dtype=enemies_raw.dtype)
+        enemy_pos_after_hit = enemies_raw.at[hit_index].set(offscreen_pos).T
 
-        # Reset pattern and timer for hit UFO
-        new_patterns = jnp.where(hit_mask, int(WhiteUFOPattern.IDLE), current_patterns)
-        new_timers = jnp.where(hit_mask, 0, current_timers)
+        # Reset pattern and timer for hit enemy ONLY IF it was actually destroyed
+        new_patterns = jnp.where(effective_hit_mask, int(WhiteUFOPattern.IDLE), current_patterns)
+        new_timers = jnp.where(effective_hit_mask, 0, current_timers)
+        new_types = jnp.where(effective_hit_mask, int(EnemyType.WHITE_UFO), current_types)
 
-        player_shot_pos = jnp.where(hit_exists, jnp.array(self.consts.BULLET_OFFSCREEN_POS), new_shot_pos)
+        player_shot_pos = jnp.where(any_hit_exists, jnp.array(self.consts.BULLET_OFFSCREEN_POS), new_shot_pos)
         enemy_pos = jnp.where(hit_exists, enemy_pos_after_hit, new_white_ufo_pos)
         white_ufo_left = jnp.where(
             hit_exists,
@@ -921,7 +871,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
         clamped_sector = jnp.minimum(state.sector, 89)
         ufo_score = 40 + 4 * clamped_sector
         score = jnp.where(hit_exists, state.score + ufo_score, state.score)
-        return (enemy_pos, player_shot_pos, new_patterns, new_timers, white_ufo_left, score, hit_mask)
+        return (enemy_pos, player_shot_pos, new_patterns, new_timers, white_ufo_left, score, effective_hit_mask, new_types)
     
     def _update_enemy_explosions(
         self,
@@ -953,10 +903,20 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
         p_swap = p_min + (p_max - p_min) * heat
         return p_swap
     
-    def _advance_white_ufos(self, state: BeamriderState, keys: chex.Array) -> WhiteUFOUpdate:
-        """Advance all white UFOs in lockstep for clearer logic inside step()."""
+    def _advance_enemies(self, state: BeamriderState, keys: chex.Array) -> WhiteUFOUpdate:
+        """Advance all enemies (UFOs and Bouncers) in lockstep."""
 
-        updates = [self._white_ufo_step(state, idx, keys[idx]) for idx in range(3)]
+        def advance_single(idx):
+            enemy_type = state.level.enemy_type[idx]
+            return jax.lax.cond(
+                enemy_type == int(EnemyType.BOUNCER),
+                lambda _: self._bouncer_step(state, idx, keys[idx]),
+                lambda _: self._white_ufo_step(state, idx, keys[idx]),
+                operand=None,
+            )
+
+        updates = [advance_single(idx) for idx in range(3)]
+        
         positions = jnp.stack([update[0] for update in updates], axis=1)
         vel_x = jnp.array([update[1] for update in updates])
         vel_y = jnp.array([update[2] for update in updates])
@@ -965,6 +925,8 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
         attack_time = jnp.array([update[4] for update in updates])
         pattern_id = jnp.array([update[5] for update in updates], dtype=jnp.int32)
         pattern_timer = jnp.array([update[6] for update in updates], dtype=jnp.int32)
+        enemy_type = jnp.array([update[7] for update in updates], dtype=jnp.int32)
+        
         return WhiteUFOUpdate(
             pos=positions,
             vel=velocities,
@@ -972,7 +934,163 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             attack_time=attack_time,
             pattern_id=pattern_id,
             pattern_timer=pattern_timer,
+            enemy_type=enemy_type,
         )
+
+    def _bouncer_step(self, state: BeamriderState, index: int, key: chex.Array):
+        # Unpack state
+        pos = jnp.array([state.level.white_ufo_pos[0][index], state.level.white_ufo_pos[1][index]])
+        vel_x = state.level.white_ufo_vel[0][index] 
+        vel_y = state.level.white_ufo_vel[1][index] 
+        lane_idx = state.level.white_ufo_time_on_lane[index].astype(jnp.int32)
+        step_index = state.level.white_ufo_attack_time[index].astype(jnp.int32)
+        state_id = state.level.white_ufo_pattern_id[index].astype(jnp.int32)
+        timer = state.level.white_ufo_pattern_timer[index].astype(jnp.int32) 
+        
+        # timer is used as persistent direction (1 or -1)
+        direction = jnp.where(timer == 0, jnp.sign(vel_x), timer.astype(jnp.float32))
+        direction = jnp.where(direction == 0, 1.0, direction)
+        direction = jnp.sign(direction)
+        
+        # --- Logic for State 0 (SWITCHING) ---
+        def switching_logic(p, l_idx, s_idx):
+            is_odd = (s_idx % 2) != 0
+            dy = jnp.where(is_odd, 1.0, 0.0)
+            
+            # If we just spawned (l_idx is -1 or 7), target lane 1 or 5 to enter main area and avoid immediate exit
+            target_lane = jnp.where(l_idx == -1, 1, 
+                                    jnp.where(l_idx == 7, 5, 
+                                              jnp.clip(l_idx + direction.astype(jnp.int32), 0, 6)))
+            
+            lane_vectors = jnp.array(self.consts.TOP_TO_BOTTOM_LANE_VECTORS, dtype=jnp.float32)
+            lanes_top_x = jnp.array(self.consts.TOP_OF_LANES, dtype=jnp.float32)
+            lane_dx_over_dy = lane_vectors[:, 0] / lane_vectors[:, 1]
+            
+            # Target X at current Y
+            target_x = lanes_top_x[target_lane] + lane_dx_over_dy[target_lane] * (p[1] - float(self.consts.TOP_CLIP))
+            
+            dist_x = target_x - p[0]
+            dx = jnp.clip(dist_x, -self.consts.BOUNCER_SWITCH_SPEED_X, self.consts.BOUNCER_SWITCH_SPEED_X)
+            
+            finished_switching = jnp.abs(dist_x) < 1.0
+            
+            next_state = jnp.where(finished_switching, int(BouncerState.DOWN), int(BouncerState.SWITCHING))
+            next_s_idx = jnp.where(finished_switching, 0, s_idx + 1)
+            next_lane = jnp.where(finished_switching, target_lane, l_idx)
+            
+            return dx, dy, next_state, next_s_idx, next_lane
+
+        # --- Logic for State 1 (DOWN) & 2 (UP) ---
+        def lane_logic(p, l_idx, s_idx, is_down):
+            speed_pattern = jnp.array(self.consts.BOUNCER_SPEED_PATTERN) # 0, 3, 0, 3
+            speed = speed_pattern[s_idx % 4]
+            
+            lane_vectors = jnp.array(self.consts.TOP_TO_BOTTOM_LANE_VECTORS, dtype=jnp.float32)
+            safe_lane = jnp.clip(l_idx, 0, 6)
+            vec = lane_vectors[safe_lane]
+            
+            vy = speed.astype(jnp.float32)
+            vx = vy * (vec[0] / vec[1])
+            
+            vy = jnp.where(is_down, vy, -vy)
+            vx = jnp.where(is_down, vx, -vx)
+            
+            # Exit lanes don't bounce up
+            can_bounce = (safe_lane > 0) & (safe_lane < 6)
+            limit_y = jnp.where(can_bounce, float(self.consts.PLAYER_POS_Y), 220.0)
+            
+            hit_bottom = (p[1] >= limit_y) & is_down
+            hit_top = (p[1] <= self.consts.BOUNCER_SPAWN_HEIGHT) & (jnp.logical_not(is_down))
+            
+            next_state = jnp.where(is_down,
+                                   jnp.where(hit_bottom, int(BouncerState.UP), int(BouncerState.DOWN)),
+                                   jnp.where(hit_top, int(BouncerState.SWITCHING), int(BouncerState.UP)))
+            
+            next_s_idx = jnp.where(hit_top & (jnp.logical_not(is_down)), 0, s_idx + 1)
+            
+            # Override for exit lanes: stay in DOWN state
+            next_state = jnp.where(jnp.logical_not(can_bounce) & is_down, int(BouncerState.DOWN), next_state)
+            
+            return vx, vy, next_state, next_s_idx, l_idx
+
+        is_switching = state_id == int(BouncerState.SWITCHING)
+        is_down = state_id == int(BouncerState.DOWN)
+        
+        dx_s, dy_s, ns_s, ni_s, nl_s = switching_logic(pos, lane_idx, step_index)
+        dx_l, dy_l, ns_l, ni_l, nl_l = lane_logic(pos, lane_idx, step_index, is_down)
+        
+        final_dx = jnp.where(is_switching, dx_s, dx_l)
+        final_dy = jnp.where(is_switching, dy_s, dy_l)
+        final_state = jnp.where(is_switching, ns_s, ns_l)
+        final_s_idx = jnp.where(is_switching, ni_s, ni_l)
+        final_lane = jnp.where(is_switching, nl_s, nl_l)
+        
+        new_x = pos[0] + final_dx
+        new_y = pos[1] + final_dy
+        
+        should_respawn = jnp.logical_or(
+            new_y > float(self.consts.BOTTOM_CLIP),
+            jnp.logical_or(new_x < 0, new_x > float(self.consts.SCREEN_WIDTH))
+        )
+        
+        # Respawn Logic
+        active_count = jnp.minimum(state.level.white_ufo_left.astype(jnp.int32), 3)
+        is_active = jnp.array(index, dtype=jnp.int32) < active_count
+        
+        # Check if another bouncer already exists
+        bouncer_exists = jnp.any((state.level.enemy_type == int(EnemyType.BOUNCER)) & (jnp.arange(3) != index))
+        can_be_bouncer = (state.sector >= self.consts.BOUNCER_START_LEVEL) & jnp.logical_not(bouncer_exists)
+        key_respawn, key_side = jax.random.split(key)
+        is_bouncer = jax.random.uniform(key_respawn) < 0.5
+        next_type = jnp.where(can_be_bouncer & is_bouncer, int(EnemyType.BOUNCER), int(EnemyType.WHITE_UFO))
+        
+        side_left = jax.random.uniform(key_side) < 0.5
+        
+        spawn_x = jnp.where(side_left, 5.0, 155.0)
+        spawn_y = self.consts.BOUNCER_SPAWN_HEIGHT
+        spawn_dir = jnp.where(side_left, 1.0, -1.0)
+        # Start at virtual lane -1 or 7 to avoid immediate clipping to lane 0 or 6
+        spawn_lane = jnp.where(side_left, -1, 7)
+        
+        ufo_spawn_pos = jnp.array([77.0, 43.0])
+        
+        final_pos = jnp.where(should_respawn, 
+                              jnp.where(next_type == int(EnemyType.BOUNCER), jnp.array([spawn_x, spawn_y]), ufo_spawn_pos),
+                              jnp.array([new_x, new_y]))
+                              
+        final_vel_x = jnp.where(should_respawn, 
+                                jnp.where(next_type == int(EnemyType.BOUNCER), spawn_dir, 0.0), 
+                                final_dx)
+                                
+        final_vel_y = jnp.where(should_respawn, 0.0, final_dy)
+        final_lane_ret = jnp.where(should_respawn, 
+                               jnp.where(next_type == int(EnemyType.BOUNCER), spawn_lane, 0),
+                               final_lane)
+        final_s_idx_ret = jnp.where(should_respawn, 0, final_s_idx)
+        final_state_ret = jnp.where(should_respawn, 
+                                jnp.where(next_type == int(EnemyType.BOUNCER), int(BouncerState.SWITCHING), int(WhiteUFOPattern.IDLE)),
+                                final_state)
+        final_timer_ret = jnp.where(should_respawn, 
+                                jnp.where(next_type == int(EnemyType.BOUNCER), spawn_dir.astype(jnp.int32), 0),
+                                timer)
+        
+        offscreen_pos = jnp.array(self.consts.ENEMY_OFFSCREEN_POS, dtype=final_pos.dtype)
+        final_pos_masked = jnp.where(is_active, final_pos, offscreen_pos)
+        
+        current_type = state.level.enemy_type[index]
+        final_type = jnp.where(should_respawn, next_type, current_type)
+        
+        return (
+            final_pos_masked,
+            final_vel_x,
+            final_vel_y,
+            final_lane_ret,
+            final_s_idx_ret,
+            final_state_ret,
+            final_timer_ret,
+            final_type
+        )
+
     def _white_ufo_step(self, state: BeamriderState, index: int, key: chex.Array):
         white_ufo_position = jnp.array([state.level.white_ufo_pos[0][index], state.level.white_ufo_pos[1][index]])
         white_ufo_vel_x = state.level.white_ufo_vel[0][index]
@@ -1020,34 +1138,71 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             )
         )
 
-        white_ufo_position = jnp.where(should_respawn, jnp.array([77.0, 43.0]), jnp.array([new_x, new_y]))
-        white_ufo_vel_x = jnp.where(should_respawn, 0.0, white_ufo_vel_x)
-        white_ufo_vel_y = jnp.where(should_respawn, 0.0, white_ufo_vel_y)
-        time_on_lane = jnp.where(should_respawn, 0, time_on_lane)
-        attack_time = jnp.where(should_respawn, 0, attack_time)
-        pattern_id = jnp.where(should_respawn, int(WhiteUFOPattern.IDLE), pattern_id)
-        pattern_timer = jnp.where(should_respawn, 0, pattern_timer)
+        key_respawn, key_side = jax.random.split(key_pattern, 2)
+        # Check if another bouncer already exists
+        bouncer_exists = jnp.any((state.level.enemy_type == int(EnemyType.BOUNCER)) & (jnp.arange(3) != index))
+        can_be_bouncer = (state.sector >= self.consts.BOUNCER_START_LEVEL) & jnp.logical_not(bouncer_exists)
+        is_bouncer = jax.random.uniform(key_respawn) < 0.5
+        next_type = jnp.where(can_be_bouncer & is_bouncer, int(EnemyType.BOUNCER), int(EnemyType.WHITE_UFO))
+        
+        # Bouncer Init
+        side_left = jax.random.uniform(key_side) < 0.5
+        
+        bouncer_spawn_x = jnp.where(side_left, 5.0, 155.0)
+        bouncer_spawn_y = self.consts.BOUNCER_SPAWN_HEIGHT
+        spawn_dir = jnp.where(side_left, 1.0, -1.0)
+        # Start at virtual lane -1 or 7 to avoid immediate clipping to lane 0 or 6
+        spawn_lane = jnp.where(side_left, -1, 7)
+        
+        ufo_spawn_pos = jnp.array([77.0, 43.0])
+        
+        final_pos = jnp.where(should_respawn, 
+                              jnp.where(next_type == int(EnemyType.BOUNCER), jnp.array([bouncer_spawn_x, bouncer_spawn_y]), ufo_spawn_pos),
+                              jnp.array([new_x, new_y]))
+        
+        final_vel_x = jnp.where(should_respawn, 
+                                jnp.where(next_type == int(EnemyType.BOUNCER), spawn_dir, 0.0),
+                                white_ufo_vel_x)
+        final_vel_y = jnp.where(should_respawn, 0.0, white_ufo_vel_y)
+        
+        final_lane = jnp.where(should_respawn, 
+                                 jnp.where(next_type == int(EnemyType.BOUNCER), spawn_lane, 0),
+                                 time_on_lane)
+        final_attack_time = jnp.where(should_respawn, 0, attack_time)
+        
+        final_pattern_id = jnp.where(should_respawn, 
+                               jnp.where(next_type == int(EnemyType.BOUNCER), int(BouncerState.SWITCHING), int(WhiteUFOPattern.IDLE)),
+                               pattern_id)
+        final_pattern_timer = jnp.where(should_respawn, 
+                                jnp.where(next_type == int(EnemyType.BOUNCER), spawn_dir.astype(jnp.int32), 0),
+                                pattern_timer)
 
         active_count = jnp.minimum(state.level.white_ufo_left.astype(jnp.int32), 3)
         is_active = jnp.array(index, dtype=jnp.int32) < active_count
         offscreen_pos = jnp.array(self.consts.ENEMY_OFFSCREEN_POS, dtype=white_ufo_position.dtype)
-        white_ufo_position = jnp.where(is_active, white_ufo_position, offscreen_pos)
-        white_ufo_vel_x = jnp.where(is_active, white_ufo_vel_x, 0.0)
-        white_ufo_vel_y = jnp.where(is_active, white_ufo_vel_y, 0.0)
-        time_on_lane = jnp.where(is_active, time_on_lane, 0)
-        attack_time = jnp.where(is_active, attack_time, 0)
-        pattern_id = jnp.where(is_active, pattern_id, int(WhiteUFOPattern.IDLE))
-        pattern_timer = jnp.where(is_active, pattern_timer, 0)
+        
+        final_pos_masked = jnp.where(is_active, final_pos, offscreen_pos)
+        final_vel_x_masked = jnp.where(is_active, final_vel_x, 0.0)
+        final_vel_y_masked = jnp.where(is_active, final_vel_y, 0.0)
+        final_lane_masked = jnp.where(is_active, final_lane, 0)
+        final_attack_time_masked = jnp.where(is_active, final_attack_time, 0)
+        final_pattern_id_masked = jnp.where(is_active, final_pattern_id, int(WhiteUFOPattern.IDLE))
+        final_pattern_timer_masked = jnp.where(is_active, final_pattern_timer, 0)
+        
+        current_type = state.level.enemy_type[index]
+        final_type = jnp.where(should_respawn, next_type, current_type)
 
         return (
-            white_ufo_position,
-            white_ufo_vel_x,
-            white_ufo_vel_y,
-            time_on_lane,
-            attack_time,
-            pattern_id,
-            pattern_timer,
+            final_pos_masked,
+            final_vel_x_masked,
+            final_vel_y_masked,
+            final_lane_masked,
+            final_attack_time_masked,
+            final_pattern_id_masked,
+            final_pattern_timer_masked,
+            final_type
         )
+
 
     def _white_ufo_pattern_requires_lane_motion(self, pattern_id: chex.Array) -> chex.Array:
         drop_straight = pattern_id == int(WhiteUFOPattern.DROP_STRAIGHT)
@@ -1718,66 +1873,6 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             hit_mask,
         )
 
-    def _rejuvenator_step(self, state: BeamriderState, key: chex.Array):
-        pos = state.level.rejuvenator_pos
-        active = state.level.rejuvenator_active
-        dead = state.level.rejuvenator_dead
-        frame = state.level.rejuvenator_frame
-        lane = state.level.rejuvenator_lane
-
-        key_spawn, key_lane = jax.random.split(key)
-        
-        # Spawning logic: only spawn if not already active
-        spawn_roll = jax.random.uniform(key_spawn)
-        
-        # FOR TESTING ONLY: spawn immediately after init
-        TEST_SPAWN = True
-        if TEST_SPAWN:
-            is_first_frame_after_init = state.level.blue_line_counter == len(BLUE_LINE_INIT_TABLE)
-            should_spawn = jnp.logical_and(jnp.logical_not(active), jnp.logical_or(spawn_roll < self.consts.REJUVENATOR_SPAWN_PROB, is_first_frame_after_init))
-        else:
-            should_spawn = jnp.logical_and(jnp.logical_not(active), spawn_roll < self.consts.REJUVENATOR_SPAWN_PROB)
-        
-        # Lanes 1 to 5
-        spawn_lane = jax.random.randint(key_lane, (), 1, 6)
-        
-        lanes_top_x = jnp.array(self.consts.TOP_OF_LANES, dtype=jnp.float32)
-        spawn_x = lanes_top_x[spawn_lane]
-        spawn_y = float(self.consts.TOP_CLIP)
-        
-        pos = jnp.where(should_spawn, jnp.array([spawn_x, spawn_y]), pos)
-        lane = jnp.where(should_spawn, spawn_lane, lane)
-        active = jnp.where(should_spawn, True, active)
-        dead = jnp.where(should_spawn, False, dead)
-        frame = jnp.where(should_spawn, 0, frame)
-
-        # Movement logic: move every 2 frames
-        should_move = jnp.logical_and(active, (state.steps % 2) == 0)
-        
-        y = pos[1]
-        is_stage_1_2 = y < self.consts.REJUVENATOR_STAGE_3_Y
-        
-        # Alternating dy for stage 3 and 4
-        dy_alt = jnp.where((frame % 2) == 0, 1.0, 2.0)
-        dy = jnp.where(is_stage_1_2, 1.0, dy_alt)
-        
-        new_y = y + jnp.where(should_move, dy, 0.0)
-        
-        # Update X based on lane
-        lane_vectors = jnp.array(self.consts.TOP_TO_BOTTOM_LANE_VECTORS, dtype=jnp.float32)
-        lane_dx_over_dy = lane_vectors[:, 0] / lane_vectors[:, 1]
-        
-        new_x = jnp.take(lanes_top_x, lane) + jnp.take(lane_dx_over_dy, lane) * (new_y - float(self.consts.TOP_CLIP))
-        
-        pos = jnp.where(active, jnp.array([new_x, new_y]), pos)
-        frame = jnp.where(should_move, frame + 1, frame)
-        
-        # Deactivate if off-screen
-        off_screen = new_y > self.consts.PLAYER_POS_Y + 1.0
-        active = jnp.where(off_screen, False, active)
-        pos = jnp.where(jnp.logical_not(active), jnp.array(self.consts.ENEMY_OFFSCREEN_POS, dtype=jnp.float32), pos)
-        
-        return pos, active, dead, frame, lane
 
     def _mothership_step(self, state: BeamriderState, white_ufo_left: chex.Array, enemy_explosion_frame: chex.Array, is_hit: chex.Array):
         """Spawn and move the mothership once all white UFOs are cleared."""
@@ -1912,14 +2007,12 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             jnp.array(self.consts.ENEMY_OFFSCREEN_POS, dtype=jnp.float32).reshape(2, 1),
             (1, self.consts.CHASING_METEOROID_MAX),
         )
-        rejuv_offscreen = jnp.array(self.consts.ENEMY_OFFSCREEN_POS, dtype=jnp.float32)
         
         # Create a state for rendering where enemies are offscreen if initializing
         render_level = state.level._replace(
             white_ufo_pos=jnp.where(is_init, ufo_offscreen, state.level.white_ufo_pos),
             enemy_shot_pos=jnp.where(is_init, enemy_shot_offscreen, state.level.enemy_shot_pos),
-            chasing_meteoroid_pos=jnp.where(is_init, chasing_meteoroid_offscreen, state.level.chasing_meteoroid_pos),
-            rejuvenator_pos=jnp.where(is_init, rejuv_offscreen, state.level.rejuvenator_pos)
+            chasing_meteoroid_pos=jnp.where(is_init, chasing_meteoroid_offscreen, state.level.chasing_meteoroid_pos)
         )
         render_state = state._replace(level=render_level)
         
@@ -1992,6 +2085,7 @@ class BeamriderRenderer(JAXGameRenderer):
             {'name': 'player_sprite', 'type': 'group', 'files': [f'Player/Player_{i}.npy' for i in range(1, 17)]},
             {'name': 'dead_player', 'type': 'single', 'file': 'Dead_Player.npy'},
             {'name': 'white_ufo', 'type': 'group', 'files': ['White_Ufo_Stage_1.npy', 'White_Ufo_Stage_2.npy', 'White_Ufo_Stage_3.npy', 'White_Ufo_Stage_4.npy', 'White_Ufo_Stage_5.npy', 'White_Ufo_Stage_6.npy', 'White_Ufo_Stage_7.npy']},
+            {'name': 'bouncer', 'type': 'single', 'file': 'Bouncer.npy'},
             {'name': 'enemy_explosion', 'type': 'group', 'files': [
                 'White_Ufo_Explosion/White_Ufo_Explosion_1.npy',
                 'White_Ufo_Explosion/White_Ufo_Explosion_2.npy',
@@ -2004,7 +2098,6 @@ class BeamriderRenderer(JAXGameRenderer):
             {'name': 'laser_sprite', 'type': 'single', 'file': 'Laser.npy'},
             {'name': 'bullet_sprite', 'type': 'group', 'files': ['Laser.npy', 'Torpedo/Torpedo_3.npy', 'Torpedo/Torpedo_2.npy', 'Torpedo/Torpedo_1.npy']},
             {'name': 'enemy_shot', 'type': 'group', 'files': ['Enemy_Shot/Enemy_Shot_Vertical.npy', 'Enemy_Shot/Enemy_Shot_Horizontal.npy']},
-            {'name': 'rejuvenator', 'type': 'group', 'files': [f'Rejuvenator/Rejuvenator_{i}.npy' for i in range(1, 5)] + ['Rejuvenator/Rejuvenator_Dead.npy']},
             {'name': 'blue_line', 'type': 'single', 'file': 'blue_line.npy'},
             {'name': 'torpedos_left', 'type': 'single', 'file': 'torpedos_left.npy'},
             {'name': 'green_numbers', 'type': 'digits', 'pattern': 'green_nums/green_{}.npy'},
@@ -2024,32 +2117,11 @@ class BeamriderRenderer(JAXGameRenderer):
         raster = self._render_blue_lines(raster, state)
         raster = self._render_player_and_bullet(raster, state)
         raster = self._render_enemy_shots(raster, state)
-        raster = self._render_white_ufos(raster, state)
+        raster = self._render_enemies(raster, state)
         raster = self._render_chasing_meteoroids(raster, state)
-        raster = self._render_rejuvenator(raster, state)
         raster = self._render_hud(raster, state)
         raster = self._render_mothership(raster, state)
         return self.jr.render_from_palette(raster, self.PALETTE)
-
-    def _render_rejuvenator(self, raster, state):
-        rejuv_pos = state.level.rejuvenator_pos
-        active = state.level.rejuvenator_active
-        dead = state.level.rejuvenator_dead
-        
-        # Determine mask
-        rejuv_masks = self.SHAPE_MASKS["rejuvenator"]
-        
-        stage = _get_index_rejuvenator(rejuv_pos[1])
-        # stage 1..4 maps to masks 0..3
-        # dead state is mask index 4
-        sprite_idx = jnp.where(dead, 4, jnp.clip(stage - 1, 0, 3))
-        
-        mask = rejuv_masks[sprite_idx]
-        
-        # Handle offscreen for rendering
-        final_y = jnp.where(active, rejuv_pos[1], 500.0)
-        
-        return self.jr.render_at(raster, rejuv_pos[0], final_y, mask)
 
     def _render_blue_lines(self, raster, state):
         """Draw the scrolling foreground lines."""
@@ -2193,11 +2265,13 @@ class BeamriderRenderer(JAXGameRenderer):
             )
         return raster
 
-    def _render_white_ufos(self, raster, state):
+    def _render_enemies(self, raster, state):
         white_ufo_masks = self.SHAPE_MASKS["white_ufo"]
+        bouncer_mask = self.SHAPE_MASKS["bouncer"]
         explosion_masks = self.SHAPE_MASKS["enemy_explosion"]
         for idx in range(3):
             explosion_frame = state.level.ufo_explosion_frame[idx]
+            enemy_type = state.level.enemy_type[idx]
 
             def render_explosion(r_in):
                 sprite_idx, y_offset = self._get_enemy_explosion_visuals(explosion_frame)
@@ -2208,19 +2282,28 @@ class BeamriderRenderer(JAXGameRenderer):
                 y_pos = state.level.ufo_explosion_pos[1][idx] + y_offset
                 return self.jr.render_at_clipped(r_in, x_pos, y_pos, sprite)
 
-            def render_ufo(r_in):
-                sprite_idx = _get_index_ufo(state.level.white_ufo_pos[1][idx]) - 1
-                sprite = white_ufo_masks[sprite_idx]
+            def render_enemy(r_in):
+                is_bouncer = enemy_type == int(EnemyType.BOUNCER)
+                
                 x_pos = state.level.white_ufo_pos[0][idx] + _get_ufo_alignment(
                     state.level.white_ufo_pos[1][idx]
                 )
                 y_pos = state.level.white_ufo_pos[1][idx]
-                return self.jr.render_at_clipped(r_in, x_pos, y_pos, sprite)
+
+                def render_bouncer(r_):
+                    return self.jr.render_at_clipped(r_, x_pos, y_pos, bouncer_mask)
+
+                def render_ufo(r_):
+                    ufo_sprite_idx = _get_index_ufo(state.level.white_ufo_pos[1][idx]) - 1
+                    ufo_sprite = white_ufo_masks[ufo_sprite_idx]
+                    return self.jr.render_at_clipped(r_, x_pos, y_pos, ufo_sprite)
+
+                return jax.lax.cond(is_bouncer, render_bouncer, render_ufo, r_in)
 
             raster = jax.lax.cond(
                 explosion_frame > 0,
                 render_explosion,
-                render_ufo,
+                render_enemy,
                 raster,
             )
         return raster
