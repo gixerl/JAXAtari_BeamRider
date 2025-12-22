@@ -4052,7 +4052,7 @@ class BeamriderRenderer(JAXGameRenderer):
         """Returns the declarative manifest of all assets for the game, including both wall sprites."""
         return [
             {'name': 'background_sprite', 'type': 'background', 'file': 'new_background.npy'},
-            {'name': 'player_sprite', 'type': 'group', 'files': [f'Player/Player_{i}.npy' for i in range(1, 17)]},
+            {'name': 'player_sprite', 'type': 'group', 'files': list(map(lambda i: f'Player/Player_{i}.npy', range(1, 17)))},
             {'name': 'purple_player', 'type': 'single', 'file': 'Purple_player_standby.npy'},
             {'name': 'dead_player', 'type': 'single', 'file': 'Dead_Player.npy'},
             {'name': 'white_ufo', 'type': 'group', 'files': ['White_Ufo_Stage_1.npy', 'White_Ufo_Stage_2.npy', 'White_Ufo_Stage_3.npy', 'White_Ufo_Stage_4.npy', 'White_Ufo_Stage_5.npy', 'White_Ufo_Stage_6.npy', 'White_Ufo_Stage_7.npy']},
@@ -4070,7 +4070,7 @@ class BeamriderRenderer(JAXGameRenderer):
             {'name': 'laser_sprite', 'type': 'single', 'file': 'Laser.npy'},
             {'name': 'bullet_sprite', 'type': 'group', 'files': ['Laser.npy', 'Torpedo/Torpedo_3.npy', 'Torpedo/Torpedo_2.npy', 'Torpedo/Torpedo_1.npy']},
             {'name': 'enemy_shot', 'type': 'group', 'files': ['Enemy_Shot/Enemy_Shot_Vertical.npy', 'Enemy_Shot/Enemy_Shot_Horizontal.npy']},
-            {'name': 'rejuvenator', 'type': 'group', 'files': [f'Rejuvenator/Rejuvenator_{i}.npy' for i in range(1, 5)] + ['Rejuvenator/Rejuvenator_Dead.npy']},
+            {'name': 'rejuvenator', 'type': 'group', 'files': list(map(lambda i: f'Rejuvenator/Rejuvenator_{i}.npy', range(1, 5))) + ['Rejuvenator/Rejuvenator_Dead.npy']},
             {'name': 'falling_rocks', 'type': 'group', 'files': ['Falling Rocks/Rock_1.npy', 'Falling Rocks/Rock_2.npy', 'Falling Rocks/Rock_3.npy', 'Falling Rocks/Rock_4.npy']},
             {'name': 'lane_blocker', 'type': 'group', 'files': [
                 'AlienBlocker/AlienBlocker_1.npy',
@@ -4410,10 +4410,17 @@ class BeamriderRenderer(JAXGameRenderer):
         """Render the torpedo inventory indicator on the HUD."""
 
         torpedo_mask = self.SHAPE_MASKS["torpedos_left"]
-        icon_config = [(3, 128), (2, 136), (1, 144)]
-        for threshold, y in icon_config:
+        thresholds = jnp.array([3, 2, 1])
+        ys = jnp.array([128, 136, 144])
+
+        def body_fun(raster, idx):
+            threshold = thresholds[idx]
+            y = ys[idx]
             y_pos = jnp.where(state.level.torpedoes_left >= threshold, y, 500)
-            raster = self.jr.render_at_clipped(raster, y_pos, 32, torpedo_mask)
+            new_raster = self.jr.render_at_clipped(raster, y_pos, 32, torpedo_mask)
+            return new_raster, None
+
+        raster, _ = jax.lax.scan(body_fun, raster, jnp.arange(3))
         return raster
 
     def _render_white_ufo_counter(self, raster, state):
