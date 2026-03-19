@@ -185,6 +185,8 @@ class StandbyPhase(IntEnum):
 class BeamriderConstants(NamedTuple):
 
     STARTING_SECTOR: int = 1
+    STARTING_LIVES: int = 3
+    MAX_LIVES: int = 14
     WHITE_UFOS_PER_SECTOR: int = 15
 
     RENDER_SCALE_FACTOR: int = 4
@@ -859,7 +861,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             sector=jnp.array(next_level),
             level_finished=jnp.array(0),
             reset_coords=jnp.array(False),
-            lives=jnp.array(3),
+            lives=jnp.array(self.consts.STARTING_LIVES, dtype=jnp.int32),
             steps=jnp.array(0),
             ufo_killed=jnp.array(False),
             rng=key,
@@ -1591,7 +1593,10 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             lambda: new_level_state,
         )
         
-        lives_after_gain = jnp.minimum(state.lives + gain_life.astype(jnp.int32), 14)
+        lives_after_gain = jnp.minimum(
+            state.lives + gain_life.astype(jnp.int32),
+            jnp.array(self.consts.MAX_LIVES, dtype=jnp.int32),
+        )
         new_lives = jnp.where(just_died, jnp.maximum(lives_after_gain - 1, 0), lives_after_gain)
 
         new_state = BeamriderState(
@@ -4442,7 +4447,8 @@ class BeamriderRenderer(JAXGameRenderer):
         # Flashing logic: 8 frames on, 8 frames off.
         flash_visible = (death_timer // 8) % 2 == 0
         
-        # Supporting up to 14 lives means up to 13 icons (lives-1)
+        max_visible_lives = max(self.consts.MAX_LIVES - 1, 0)
+
         def body_fun(raster, idx):
             # Normal logic: render if idx < state.lives - 1 (Bonus HP display)
             
@@ -4469,7 +4475,7 @@ class BeamriderRenderer(JAXGameRenderer):
             new_raster = self.jr.render_at_clipped(raster, pos_x, 183, hp_mask)
             return new_raster, None
 
-        raster, _ = jax.lax.scan(body_fun, raster, jnp.arange(13))
+        raster, _ = jax.lax.scan(body_fun, raster, jnp.arange(max_visible_lives))
         return raster
 
     def _render_player_and_bullet(self, raster, state):
