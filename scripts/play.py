@@ -1,5 +1,12 @@
 import argparse
 import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 import pygame
 
 import jax
@@ -8,7 +15,7 @@ import numpy as np
 
 from jaxatari.environment import JAXAtariAction
 from utils import get_human_action, update_pygame, load_game_environment, load_game_mods, print_observation_tree
-from jaxatari.core import make as jaxatari_make
+from jaxatari.core import make as jaxatari_make, list_available_games
 
 UPSCALE_FACTOR = 4
 
@@ -120,17 +127,49 @@ def main():
 
     execute_without_rendering = False
     
-    try:
-        # 1. Try the registered path (core.make)
-        env = jaxatari_make(
-            game_name=args.game,
-            mods=args.mods,
-            allow_conflicts=args.allow_conflicts
-        )
-        print(f"Successfully loaded registered game: '{args.game}'")
-    except (NotImplementedError, ImportError) as e:
-        # 2. If not registered, try the dynamic path
-        print(f"Game '{args.game}' not registered or import error ({e}). Trying dynamic load...")
+    registered_games = set(list_available_games())
+    if args.game.lower() in registered_games:
+        try:
+            # 1. Try the registered path (core.make)
+            env = jaxatari_make(
+                game_name=args.game,
+                mods=args.mods,
+                allow_conflicts=args.allow_conflicts
+            )
+            print(f"Successfully loaded registered game: '{args.game}'")
+        except (FileNotFoundError, ValueError, AttributeError, RuntimeError) as e_reg:
+            print(f"Error loading registered game or mods: {e_reg}")
+            sys.exit(1)
+        except (NotImplementedError, ImportError) as e:
+            print(f"Registered load failed for '{args.game}' ({e}). Trying dynamic load...")
+            try:
+                # 2a. Dynamically load the base game environment
+                # We only need the 'game' object; it will have its own .renderer
+                game_env, _ = load_game_environment(args.game)
+                
+                # 2b. Apply mods if requested
+                if args.mods:
+                    print(f"Applying mods: {args.mods}")
+                    # Get the function that applies the full modding pipeline
+                    mod_applier = load_game_mods(
+                        game_name=args.game,
+                        mods_config=args.mods,
+                        allow_conflicts=args.allow_conflicts
+                    )
+                    # Apply the mods to the base env
+                    env = mod_applier(game_env)
+                else:
+                    # No mods, just use the dynamically loaded game
+                    env = game_env
+                
+                print(f"Successfully loaded unregistered game: '{args.game}'")
+            except (FileNotFoundError, ImportError, ValueError, AttributeError) as e_dyn:
+                # 3. If dynamic loading also fails, then we exit
+                print(f"Error: Failed to load game '{args.game}' dynamically.")
+                print(f"Details: {e_dyn}")
+                sys.exit(1)
+    else:
+        print(f"Game '{args.game}' is not registered. Trying dynamic load...")
         try:
             # 2a. Dynamically load the base game environment
             # We only need the 'game' object; it will have its own .renderer
@@ -157,11 +196,6 @@ def main():
             print(f"Error: Failed to load game '{args.game}' dynamically.")
             print(f"Details: {e_dyn}")
             sys.exit(1)
-    
-    except (FileNotFoundError, ValueError, AttributeError) as e_reg:
-        # 4. Catch other errors from the registered path (e.g., mod conflict)
-        print(f"Error loading registered game or mods: {e_reg}")
-        sys.exit(1)
 
     if not hasattr(env, "renderer"):
         execute_without_rendering = True
