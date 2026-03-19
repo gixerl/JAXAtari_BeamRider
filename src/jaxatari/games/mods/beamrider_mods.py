@@ -1,5 +1,5 @@
 from jaxatari.modification import JaxAtariModController
-from jaxatari.games.mods.beamrider.beamrider_mod_plugins import HardcoreMod
+from jaxatari.games.mods.beamrider.beamrider_mod_plugins import HardcoreMod, SameEnemiesMod
 
 
 class BeamriderEnvMod(JaxAtariModController):
@@ -9,6 +9,7 @@ class BeamriderEnvMod(JaxAtariModController):
 
     REGISTRY = {
         "hardcore": HardcoreMod,
+        "same_enemies": SameEnemiesMod,
     }
 
     def __init__(
