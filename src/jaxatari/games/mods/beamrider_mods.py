@@ -1,5 +1,11 @@
 from jaxatari.modification import JaxAtariModController
-from jaxatari.games.mods.beamrider.beamrider_mod_plugins import HardcoreMod, SameEnemiesMod, ToasterMod
+from jaxatari.games.mods.beamrider.beamrider_mod_plugins import (
+    HardcoreMod,
+    MothershipLaserMod,
+    SameEnemiesMod,
+    TeleportUFOsMod,
+    ToasterMod,
+)
 
 
 class BeamriderEnvMod(JaxAtariModController):
@@ -9,7 +15,9 @@ class BeamriderEnvMod(JaxAtariModController):
 
     REGISTRY = {
         "hardcore": HardcoreMod,
+        "mothership_laser": MothershipLaserMod,
         "same_enemies": SameEnemiesMod,
+        "teleport_ufos": TeleportUFOsMod,
         "toaster": ToasterMod,
     }
 
