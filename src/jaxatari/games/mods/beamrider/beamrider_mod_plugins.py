@@ -267,6 +267,183 @@ def _init_white_ufo_pattern_timer(pattern, duration):
     return jnp.where(is_teleport, _pack_teleport_ufo_timer(duration, jnp.array(False)), timer)
 
 
+def _get_fog_of_war_top_y(state, consts) -> jnp.ndarray:
+    active_lines = state.level.line_positions >= 0
+    safe_line_positions = jnp.where(
+        active_lines,
+        state.level.line_positions.astype(jnp.int32),
+        jnp.array(consts.BLUE_LINE_OFFSCREEN_Y, dtype=jnp.int32),
+    )
+    top_line_y = jnp.where(
+        jnp.any(active_lines),
+        jnp.min(safe_line_positions),
+        jnp.array(consts.MIN_BLUE_LINE_POS, dtype=jnp.int32),
+    )
+    return jnp.maximum(top_line_y - 1, jnp.array(consts.TOP_CLIP, dtype=jnp.int32))
+
+
+def _get_fog_of_war_cutoff_y(fog_top, consts) -> jnp.ndarray:
+    player_y = jnp.array(consts.PLAYER_POS_Y, dtype=jnp.int32)
+    visible_band_height = jnp.maximum(player_y - fog_top, 0)
+    return player_y - jnp.floor_divide(visible_band_height, 3)
+
+
+def _build_elliptical_fog_pattern(width, height, ellipses):
+    yy, xx = jnp.meshgrid(
+        jnp.arange(height, dtype=jnp.float32),
+        jnp.arange(width, dtype=jnp.float32),
+        indexing="ij",
+    )
+    density = jnp.full((height, width), -1.0, dtype=jnp.float32)
+    for cx, cy, rx, ry, weight in ellipses:
+        normalized = ((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2
+        density = jnp.maximum(density, weight - normalized)
+
+    return jnp.where(
+        density > 0.56,
+        3,
+        jnp.where(density > 0.22, 2, jnp.where(density > 0.02, 1, 0)),
+    ).astype(jnp.int32)
+
+
+FOG_BANK_PATTERNS = (
+    _build_elliptical_fog_pattern(
+        44,
+        12,
+        (
+            (10.0, 8.0, 10.0, 4.8, 1.0),
+            (22.0, 6.0, 12.5, 6.2, 1.08),
+            (34.0, 8.0, 10.0, 4.8, 0.98),
+        ),
+    ),
+    _build_elliptical_fog_pattern(
+        38,
+        10,
+        (
+            (8.0, 6.7, 8.5, 4.2, 1.0),
+            (18.0, 4.8, 10.2, 5.0, 1.05),
+            (29.0, 6.7, 8.5, 4.1, 0.97),
+        ),
+    ),
+    _build_elliptical_fog_pattern(
+        30,
+        8,
+        (
+            (7.0, 5.3, 7.2, 3.6, 1.0),
+            (15.0, 3.8, 8.4, 4.2, 1.03),
+            (23.0, 5.5, 6.8, 3.4, 0.95),
+        ),
+    ),
+)
+
+FOG_WISP_PATTERNS = (
+    _build_elliptical_fog_pattern(
+        24,
+        6,
+        (
+            (7.0, 3.8, 6.8, 2.4, 1.0),
+            (14.0, 2.5, 7.8, 2.3, 0.96),
+            (19.0, 3.7, 4.8, 1.9, 0.84),
+        ),
+    ),
+    _build_elliptical_fog_pattern(
+        20,
+        5,
+        (
+            (6.0, 3.1, 5.8, 2.0, 1.0),
+            (12.0, 2.0, 6.8, 2.0, 0.94),
+            (16.0, 3.0, 4.0, 1.6, 0.8),
+        ),
+    ),
+)
+
+FOG_BANK_LAYOUT = (
+    (0, 2, -4, 18, 26),
+    (1, 46, -3, 20, 24),
+    (2, 90, -4, 22, 28),
+    (1, 126, -5, 19, 25),
+)
+
+FOG_WISP_LAYOUT = (
+    (0, 18, 1, 30, 34),
+    (1, 82, 2, 36, 40),
+    (0, 118, 3, 32, 38),
+)
+
+
+def _materialize_fog_mask(pattern, transparent_id, edge_id, body_id, highlight_id):
+    mask = jnp.full(pattern.shape, transparent_id, dtype=jnp.int32)
+    mask = jnp.where(pattern == 1, edge_id, mask)
+    mask = jnp.where(pattern == 2, body_id, mask)
+    return jnp.where(pattern == 3, highlight_id, mask)
+
+
+def _apply_fog_of_war(renderer, raster, state):
+    fog_top = _get_fog_of_war_top_y(state, renderer.consts)
+    fog_cutoff = _get_fog_of_war_cutoff_y(fog_top, renderer.consts)
+    fog_height = jnp.maximum(fog_cutoff - fog_top, 1)
+    fog_left = jnp.array(8, dtype=jnp.int32)
+    fog_right = fog_left + jnp.array(renderer.SHAPE_MASKS["blue_line"].shape[1], dtype=jnp.int32)
+    xx = renderer.jr._xx
+    yy = renderer.jr._yy
+    rel_y = jnp.clip(yy - fog_top, 0, fog_height)
+    in_fog_band = (yy >= fog_top) & (yy < fog_cutoff) & (xx >= fog_left) & (xx < fog_right)
+
+    edge_fog_id = jnp.array(renderer.COLOR_TO_ID[(192, 192, 192)], dtype=raster.dtype)
+    body_fog_id = jnp.array(renderer.COLOR_TO_ID[(214, 214, 214)], dtype=raster.dtype)
+    highlight_fog_id = jnp.array(renderer.COLOR_TO_ID[(236, 236, 236)], dtype=raster.dtype)
+    shadow_fog_id = jnp.array(renderer.COLOR_TO_ID[(170, 170, 170)], dtype=raster.dtype)
+    transparent_id = jnp.array(renderer.jr.TRANSPARENT_ID, dtype=jnp.int32)
+
+    top_fill_limit = fog_height // 4
+    mid_fill_limit = (3 * fog_height) // 5
+    fill_id = jnp.where(
+        rel_y < top_fill_limit,
+        edge_fog_id,
+        jnp.where(rel_y < mid_fill_limit, body_fog_id, highlight_fog_id),
+    )
+
+    fog_raster = jnp.where(in_fog_band, fill_id, raster)
+
+    bank_masks = tuple(
+        _materialize_fog_mask(pattern, transparent_id, edge_fog_id, body_fog_id, highlight_fog_id)
+        for pattern in FOG_BANK_PATTERNS
+    )
+    wisp_masks = tuple(
+        _materialize_fog_mask(pattern, transparent_id, shadow_fog_id, edge_fog_id, body_fog_id)
+        for pattern in FOG_WISP_PATTERNS
+    )
+
+    for idx, (pattern_idx, base_x, y_offset, drift_speed, bob_speed) in enumerate(FOG_BANK_LAYOUT):
+        mask = bank_masks[pattern_idx]
+        drift = jnp.mod(state.steps // drift_speed + (idx * 3), 7) - 3
+        bob = jnp.mod(state.steps // bob_speed + idx, 3) - 1
+        draw_x = jnp.array(base_x, dtype=jnp.int32) + drift
+        draw_y = fog_cutoff - mask.shape[0] + jnp.array(y_offset, dtype=jnp.int32) + bob
+        fog_raster = renderer.jr.render_at_clipped(fog_raster, draw_x, draw_y, mask)
+
+    for idx, (pattern_idx, base_x, band_fraction, drift_speed, bob_speed) in enumerate(FOG_WISP_LAYOUT):
+        mask = wisp_masks[pattern_idx]
+        anchor_y = fog_top + 4 + (fog_height * band_fraction) // 6
+        drift = 3 - jnp.mod(state.steps // drift_speed + (idx * 5), 7)
+        bob = jnp.mod(state.steps // bob_speed + idx, 3) - 1
+        draw_x = jnp.array(base_x, dtype=jnp.int32) + drift
+        draw_y = anchor_y + bob
+        fog_raster = renderer.jr.render_at_clipped(fog_raster, draw_x, draw_y, mask)
+
+    return jnp.where(in_fog_band, fog_raster, raster)
+
+
+class FogOfWarMod(JaxAtariInternalModPlugin):
+    """Hide the upper two thirds of the playfield behind opaque fog."""
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _render_hud(self, raster, state):
+        renderer = self._env.renderer
+        raster = _apply_fog_of_war(renderer, raster, state)
+        return type(renderer)._render_hud(renderer, raster, state)
+
+
 class HardcoreMod(JaxAtariInternalModPlugin):
     """Start with one life and never allow extra lives."""
 

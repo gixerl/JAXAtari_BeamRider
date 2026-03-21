@@ -1,5 +1,6 @@
 from jaxatari.modification import JaxAtariModController
 from jaxatari.games.mods.beamrider.beamrider_mod_plugins import (
+    FogOfWarMod,
     HardcoreMod,
     MothershipLaserMod,
     SameEnemiesMod,
@@ -15,6 +16,7 @@ class BeamriderEnvMod(JaxAtariModController):
     """
 
     REGISTRY = {
+        "fog_of_war": FogOfWarMod,
         "hardcore": HardcoreMod,
         "mothership_laser": MothershipLaserMod,
         "same_enemies": SameEnemiesMod,
