@@ -1,5 +1,6 @@
 from jaxatari.modification import JaxAtariModController
 from jaxatari.games.mods.beamrider.beamrider_mod_plugins import (
+    DoubleEnemySpeedMod,
     FogOfWarMod,
     HardcoreMod,
     MothershipLaserMod,
@@ -16,6 +17,7 @@ class BeamriderEnvMod(JaxAtariModController):
     """
 
     REGISTRY = {
+        "double_enemy_speed": DoubleEnemySpeedMod,
         "fog_of_war": FogOfWarMod,
         "hardcore": HardcoreMod,
         "mothership_laser": MothershipLaserMod,
