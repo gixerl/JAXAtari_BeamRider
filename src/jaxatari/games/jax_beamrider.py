@@ -212,8 +212,8 @@ class BeamriderConstants(NamedTuple):
     # ALE uses projectile existence as the main limiter.
     # We use a shared recovery window after hit/destruction (measured ~8 frames in ALE).
     PLAYER_SHOT_RECOVERY: int = 6
-    # Delay from button press to shot appearance (measured ~3 frames in ALE).
-    PLAYER_SHOT_LAUNCH_DELAY: int = 2
+    # After gameplay starts, ALE spawns the projectile on the next frame.
+    PLAYER_SHOT_LAUNCH_DELAY: int = 1
 
     BOTTOM_CLIP:int = 164
     TOP_CLIP:int=43
@@ -404,6 +404,14 @@ def _get_player_shot_screen_x(
         jnp.where(shot_dir > 0, jnp.floor(shot_x_base), jnp.round(shot_x_base)),
     )
     return shot_x_rounded + _get_bullet_alignment(player_shot_pos[1], bullet_type, laser_id)
+
+
+def _get_player_screen_x(player_pos: chex.Array) -> chex.Array:
+    return jnp.where(
+        player_pos == 27.0,
+        26.0,
+        jnp.where(player_pos == 52.0, 51.0, jnp.where(player_pos == 127.0, 128.0, player_pos)),
+    )
 
 
 class LevelState(NamedTuple):
@@ -1767,12 +1775,6 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
         action = jnp.where(is_dead, Action.NOOP, action)
         v = jnp.where(is_dead, 0.0, v)
 
-        # Actions with UP component trigger torpedo
-        press_up = jnp.isin(action, self._actions_up)
-
-        # Actions with FIRE component trigger laser
-        press_fire = jnp.isin(action, self._actions_fire)
-
         is_in_lane = jnp.isin(x, self.bottom_lanes) # predicate: x is one of LANES
 
         v = jax.lax.cond(
@@ -1812,8 +1814,8 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             shooting_delay == 0
         ]))
 
-        want_torpedo = jnp.isin(action, self._torpedo_actions) & (state.level.torpedoes_left >= 1)
-        want_laser = jnp.isin(action, self._laser_actions) & jnp.logical_not(want_torpedo)
+        want_torpedo = (action == Action.UP) & (state.level.torpedoes_left >= 1)
+        want_laser = action == Action.FIRE
         
         initiate_launch = can_initiate_launch & (want_torpedo | want_laser)
         
@@ -4482,6 +4484,7 @@ class BeamriderRenderer(JAXGameRenderer):
         player_masks = self.SHAPE_MASKS["player_sprite"]
         dead_player_mask = self.SHAPE_MASKS["dead_player"]
         purple_player_mask = self.SHAPE_MASKS["purple_player"]
+        player_screen_x = _get_player_screen_x(state.level.player_pos)
         
         # Determine which mask to use
         is_dead = state.level.death_timer > 0
@@ -4502,10 +4505,10 @@ class BeamriderRenderer(JAXGameRenderer):
             mask = jnp.where(use_purple, purple_player_mask, mask)
             mask = jnp.where(use_p10, player_masks[9], mask)
             
-            return self.jr.render_at(r, state.level.player_pos, self.consts.PLAYER_POS_Y, mask)
+            return self.jr.render_at(r, player_screen_x, self.consts.PLAYER_POS_Y, mask)
 
         def render_dead(r):
-            return self.jr.render_at(r, state.level.player_pos, self.consts.PLAYER_POS_Y, dead_player_mask)
+            return self.jr.render_at(r, player_screen_x, self.consts.PLAYER_POS_Y, dead_player_mask)
 
         raster = jax.lax.cond(is_dead, render_dead, render_alive, raster)
 
