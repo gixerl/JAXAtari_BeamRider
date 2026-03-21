@@ -184,7 +184,7 @@ class StandbyPhase(IntEnum):
 
 class BeamriderConstants(NamedTuple):
 
-    STARTING_SECTOR: int = 10
+    STARTING_SECTOR: int = 1
     STARTING_LIVES: int = 3
     MAX_LIVES: int = 14
     WHITE_UFOS_PER_SECTOR: int = 15
