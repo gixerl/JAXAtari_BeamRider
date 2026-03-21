@@ -4,6 +4,7 @@ from jaxatari.games.mods.beamrider.beamrider_mod_plugins import (
     MothershipLaserMod,
     SameEnemiesMod,
     TeleportUFOsMod,
+    ThreeLanesMod,
     ToasterMod,
 )
 
@@ -18,6 +19,7 @@ class BeamriderEnvMod(JaxAtariModController):
         "mothership_laser": MothershipLaserMod,
         "same_enemies": SameEnemiesMod,
         "teleport_ufos": TeleportUFOsMod,
+        "three_lanes": ThreeLanesMod,
         "toaster": ToasterMod,
     }
 

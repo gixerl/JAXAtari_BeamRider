@@ -66,9 +66,47 @@ TELEPORT_UFO_TIMER_MASK = 0xFF
 TELEPORT_UFO_USED_BIT = 1 << 8
 TELEPORT_UFO_LANE_OFFSETS = jnp.array([-2, -1, 1, 2], dtype=jnp.int32)
 
+THREE_LANE_TOP_IDS = jnp.array([2, 3, 4], dtype=jnp.int32)
+THREE_LANE_TOP_LANES = jnp.array([71.0, 71.0, 71.0, 81.0, 91.0, 91.0, 91.0], dtype=jnp.float32)
+THREE_LANE_BOTTOM_LANES = jnp.array([0.0, 52.0, 77.0, 102.0, 154.0], dtype=jnp.float32)
+THREE_LANE_TOP_TO_BOTTOM = jnp.array(
+    [
+        (-0.52, 4.0),
+        (-0.52, 4.0),
+        (-0.52, 4.0),
+        (0.0, 4.0),
+        (0.52, 4.0),
+        (0.52, 4.0),
+        (0.52, 4.0),
+    ],
+    dtype=jnp.float32,
+)
+THREE_LANE_BOTTOM_TO_TOP = jnp.array(
+    [
+        (-0.52, 4.0),
+        (-0.52, 4.0),
+        (0.0, 4.0),
+        (0.52, 4.0),
+        (0.52, 4.0),
+    ],
+    dtype=jnp.float32,
+)
+THREE_LANE_LEFT_BOUND = 71.0
+THREE_LANE_RIGHT_BOUND = 91.0
+
 
 def _get_lane_x(env, lane, y_pos):
     return env.top_lanes_x[lane] + env.lane_dx_over_dy[lane] * (y_pos - float(env.consts.TOP_CLIP))
+
+
+def _canonical_three_lane_ufo_lane(lane: jnp.ndarray) -> jnp.ndarray:
+    lane = lane.astype(jnp.int32)
+    return jnp.where(lane <= 2, 2, jnp.where(lane >= 4, 4, 3))
+
+
+def _is_three_lane_shootable(lane: jnp.ndarray) -> jnp.ndarray:
+    lane = lane.astype(jnp.int32)
+    return (lane >= 2) & (lane <= 4)
 
 
 def _get_mothership_y(env):
@@ -195,6 +233,412 @@ class HardcoreMod(JaxAtariInternalModPlugin):
         "STARTING_LIVES": 1,
         "MAX_LIVES": 1,
     }
+
+
+class ThreeLanesMod(JaxAtariInternalModPlugin):
+    """Collapse Beamrider's track to the center three lanes."""
+
+    constants_overrides = {
+        "LEFT_CLIP_PLAYER": 52,
+        "RIGHT_CLIP_PLAYER": 117,
+    }
+
+    attribute_overrides = {
+        "bottom_lanes": THREE_LANE_BOTTOM_LANES,
+        "top_lanes_x": THREE_LANE_TOP_LANES,
+        "lane_vectors_t2b": THREE_LANE_TOP_TO_BOTTOM,
+        "lane_vectors_b2t": THREE_LANE_BOTTOM_TO_TOP,
+        "lane_dx_over_dy": THREE_LANE_TOP_TO_BOTTOM[:, 0] / THREE_LANE_TOP_TO_BOTTOM[:, 1],
+        "middle_lane_spawn": THREE_LANE_TOP_IDS,
+    }
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _white_ufo_choose_pattern(
+        self,
+        key,
+        *,
+        allow_shoot,
+        prev_pattern,
+        is_kamikaze_zone,
+        sector,
+        stage,
+        lane,
+        is_on_lane,
+    ):
+        pattern_choices = jnp.array(
+            [
+                int(WhiteUFOPattern.DROP_STRAIGHT),
+                int(WhiteUFOPattern.DROP_LEFT),
+                int(WhiteUFOPattern.DROP_RIGHT),
+                int(WhiteUFOPattern.SHOOT),
+                int(WhiteUFOPattern.MOVE_BACK),
+                int(WhiteUFOPattern.KAMIKAZE),
+                int(WhiteUFOPattern.TRIPLE_SHOT_RIGHT),
+                int(WhiteUFOPattern.TRIPLE_SHOT_LEFT),
+            ],
+            dtype=jnp.int32,
+        )
+        pattern_probs = self._env.ufo_pattern_probs
+
+        is_move_back = prev_pattern == int(WhiteUFOPattern.MOVE_BACK)
+        chain_mask = jnp.ones_like(pattern_probs).at[0].set(jnp.where(is_move_back, 0.0, 1.0))
+        pattern_probs = pattern_probs * chain_mask
+
+        shoot_mask = jnp.array([1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0], dtype=jnp.float32)
+        pattern_probs = jnp.where(allow_shoot, pattern_probs, pattern_probs * shoot_mask)
+
+        kamikaze_mask = jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0], dtype=jnp.float32)
+        pattern_probs = jnp.where(is_kamikaze_zone, pattern_probs, pattern_probs * kamikaze_mask)
+
+        move_back_mask = jnp.array([1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0], dtype=jnp.float32)
+        pattern_probs = jnp.where(stage >= 4, pattern_probs, pattern_probs * move_back_mask)
+
+        can_triple = (sector >= 7) & (stage >= 4) & (stage <= 6) & is_on_lane
+        can_triple_right = can_triple & (lane >= 2) & (lane <= 3)
+        can_triple_left = can_triple & (lane >= 3) & (lane <= 4)
+
+        triple_right_mask = jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0], dtype=jnp.float32)
+        triple_left_mask = jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0], dtype=jnp.float32)
+        pattern_probs = jnp.where(can_triple_right, pattern_probs, pattern_probs * triple_right_mask)
+        pattern_probs = jnp.where(can_triple_left, pattern_probs, pattern_probs * triple_left_mask)
+
+        prob_sum = jnp.sum(pattern_probs)
+        pattern_probs = jnp.where(prob_sum > 0, pattern_probs / prob_sum, pattern_probs)
+
+        pattern = jax.random.choice(key, pattern_choices, shape=(), p=pattern_probs)
+        duration = self._env.ufo_pattern_durations[pattern]
+        return pattern, duration
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _white_ufo_update_pattern_state(
+        self,
+        sector,
+        position,
+        time_on_lane,
+        attack_time,
+        already_left,
+        spawn_delay,
+        pattern_id,
+        pattern_timer,
+        key,
+    ):
+        on_top_lane = position[1] <= self._env.consts.TOP_CLIP
+        time_on_lane = jnp.where(on_top_lane, time_on_lane + 1, 0)
+        attack_time = jnp.where(on_top_lane, 0, attack_time)
+
+        ufo_x = position[0].astype(jnp.float32)
+        ufo_y = position[1].astype(jnp.float32)
+        lane_x_at_ufo_y = self._env.top_lanes_x + self._env.lane_dx_over_dy * (ufo_y - float(self._env.consts.TOP_CLIP))
+        raw_lane_id = jnp.argmin(jnp.abs(lane_x_at_ufo_y - ufo_x)).astype(jnp.int32)
+        closest_lane_id = _canonical_three_lane_ufo_lane(raw_lane_id)
+        closest_lane_x = lane_x_at_ufo_y[closest_lane_id]
+        dist_to_lane = jnp.abs(closest_lane_x - ufo_x)
+        is_on_lane = dist_to_lane <= 0.25
+
+        is_triple = (pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_RIGHT)) | (pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_LEFT))
+
+        shots_left = pattern_timer & 7
+        last_lane = (pattern_timer >> 3) & 15
+        shoot_now = (pattern_timer >> 7) & 1
+
+        def update_triple(_):
+            can_shoot = (shots_left > 0) & is_on_lane & (closest_lane_id != last_lane)
+            new_shoot_now = jnp.where(shoot_now == 1, 0, jnp.where(can_shoot, 1, 0))
+            new_shots_left = jnp.where(can_shoot, shots_left - 1, shots_left)
+            new_last_lane = jnp.where(can_shoot, closest_lane_id, last_lane)
+            return (new_shoot_now << 7) | (new_last_lane << 3) | new_shots_left
+
+        pattern_timer = jnp.where(
+            is_triple,
+            update_triple(None),
+            jnp.maximum(pattern_timer - 1, jnp.zeros_like(pattern_timer)),
+        )
+
+        allow_shoot = (~on_top_lane) & _is_three_lane_shootable(closest_lane_id)
+
+        is_drop_pattern = (
+            (pattern_id == int(WhiteUFOPattern.DROP_STRAIGHT))
+            | (pattern_id == int(WhiteUFOPattern.DROP_LEFT))
+            | (pattern_id == int(WhiteUFOPattern.DROP_RIGHT))
+            | (pattern_id == int(WhiteUFOPattern.MOVE_BACK))
+        )
+        is_shoot_pattern = pattern_id == int(WhiteUFOPattern.SHOOT)
+        is_engagement_pattern = is_drop_pattern | is_shoot_pattern | is_triple
+        attack_time = jnp.where((~on_top_lane) & is_engagement_pattern, attack_time + 1, attack_time)
+
+        is_retreat = pattern_id == int(WhiteUFOPattern.RETREAT)
+        is_move_back = pattern_id == int(WhiteUFOPattern.MOVE_BACK)
+        movement_finished = (is_retreat | is_move_back) & on_top_lane
+        pattern_id = jnp.where(movement_finished, int(WhiteUFOPattern.IDLE), pattern_id)
+        pattern_timer = jnp.where(movement_finished, 0, pattern_timer)
+        attack_time = jnp.where(movement_finished, 0, attack_time)
+
+        triple_finished = is_triple & ((pattern_timer & 7) == 0) & jnp.logical_not((pattern_timer >> 7) & 1) & is_on_lane
+
+        lane_offset = jnp.where(pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_RIGHT), 1, 0)
+        lane_offset = jnp.where(pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_LEFT), -1, lane_offset)
+        target_lane_id = jnp.clip(closest_lane_id + lane_offset, 2, 4)
+
+        triple_stuck = is_triple & is_on_lane & (shots_left > 0) & (target_lane_id == closest_lane_id) & (closest_lane_id == last_lane)
+        triple_finished = triple_finished | triple_stuck
+
+        pattern_finished_off_top = (~on_top_lane) & is_engagement_pattern & jnp.where(is_triple, triple_finished, pattern_timer == 0) & is_on_lane
+
+        key_start_roll, key_start_choice, key_retreat_roll, key_chain_choice, _ = jax.random.split(key, 5)
+        retreat_roll = jax.random.uniform(key_retreat_roll)
+        retreat_prob = self._env._white_ufo_retreat_prob(attack_time)
+        retreat_now = pattern_finished_off_top & (retreat_roll < retreat_prob)
+        pattern_id = jnp.where(retreat_now, int(WhiteUFOPattern.RETREAT), pattern_id)
+        pattern_timer = jnp.where(retreat_now, self._env.consts.WHITE_UFO_RETREAT_DURATION, pattern_timer)
+        attack_time = jnp.where(retreat_now, 0, attack_time)
+
+        chain_next = pattern_finished_off_top & (~retreat_now)
+        ufo_stage = _get_index_ufo(position[1])
+
+        def choose_chain_pattern(_):
+            is_kamikaze_zone = position[1] >= self._env.consts.KAMIKAZE_Y_THRESHOLD
+            pattern, duration = self._white_ufo_choose_pattern(
+                key_chain_choice,
+                allow_shoot=allow_shoot,
+                prev_pattern=pattern_id,
+                is_kamikaze_zone=is_kamikaze_zone,
+                sector=sector,
+                stage=ufo_stage,
+                lane=closest_lane_id,
+                is_on_lane=is_on_lane,
+            )
+            return pattern, _init_white_ufo_pattern_timer(pattern, duration)
+
+        pattern_id, pattern_timer = jax.lax.cond(
+            chain_next,
+            choose_chain_pattern,
+            lambda _: (pattern_id, pattern_timer),
+            operand=None,
+        )
+
+        should_choose_new = on_top_lane & (pattern_id == int(WhiteUFOPattern.IDLE)) & (pattern_timer == 0) & (spawn_delay == 0)
+        p_start = type(self._env).entropy_heat_prob_static(
+            jnp.where(already_left, time_on_lane * 10, time_on_lane),
+            alpha=self._env.consts.WHITE_UFO_ATTACK_ALPHA,
+            p_min=jnp.where(already_left, 0.1, self._env.consts.WHITE_UFO_ATTACK_P_MIN),
+            p_max=self._env.consts.WHITE_UFO_ATTACK_P_MAX,
+        )
+        start_roll = jax.random.uniform(key_start_roll)
+        start_attack = should_choose_new & (start_roll < p_start)
+
+        def choose_new_pattern(_):
+            pattern, duration = self._white_ufo_choose_pattern(
+                key_start_choice,
+                allow_shoot=jnp.array(False),
+                prev_pattern=pattern_id,
+                is_kamikaze_zone=jnp.array(False),
+                sector=sector,
+                stage=ufo_stage,
+                lane=closest_lane_id,
+                is_on_lane=is_on_lane,
+            )
+            return pattern, _init_white_ufo_pattern_timer(pattern, duration)
+
+        pattern_id, pattern_timer = jax.lax.cond(
+            start_attack,
+            choose_new_pattern,
+            lambda _: (pattern_id, pattern_timer),
+            operand=None,
+        )
+
+        return pattern_id, pattern_timer, time_on_lane, attack_time
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _white_ufo_top_lane(self, white_ufo_pos, white_ufo_vel_x, pattern_id, key):
+        hold_position = (pattern_id == int(WhiteUFOPattern.SHOOT)) | (white_ufo_pos[1] > float(self._env.consts.TOP_CLIP))
+        min_speed = float(self._env.consts.WHITE_UFO_TOP_LANE_MIN_SPEED)
+        turn_speed = float(self._env.consts.WHITE_UFO_TOP_LANE_TURN_SPEED)
+
+        vx = jnp.where(hold_position, 0.0, white_ufo_vel_x)
+        need_boost = (~hold_position) & (jnp.abs(vx) < min_speed)
+        random_sign = jnp.where(jax.random.uniform(key) < 0.5, -1.0, 1.0)
+        direction = jnp.where(vx == 0.0, random_sign, jnp.sign(vx))
+        vx = jnp.where(need_boost, direction * min_speed, vx)
+
+        do_bounce = ~hold_position
+        vx = jnp.where(do_bounce & (white_ufo_pos[0] >= THREE_LANE_RIGHT_BOUND), -turn_speed, vx)
+        vx = jnp.where(do_bounce & (white_ufo_pos[0] <= THREE_LANE_LEFT_BOUND), turn_speed, vx)
+        return vx, 0.0
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _white_ufo_normal(self, white_ufo_pos, white_ufo_vel_x, white_ufo_vel_y, pattern_id, already_left):
+        speed_factor = self._env.consts.WHITE_UFO_SPEED_FACTOR
+        retreat_mult = self._env.consts.WHITE_UFO_RETREAT_SPEED_MULT
+        x, y = white_ufo_pos[0], white_ufo_pos[1]
+
+        lane_x_at_y = self._env.top_lanes_x + self._env.lane_dx_over_dy * (y - float(self._env.consts.TOP_CLIP))
+        raw_lane_id = jnp.argmin(jnp.abs(lane_x_at_y - x))
+        closest_lane_id = _canonical_three_lane_ufo_lane(raw_lane_id)
+
+        lane_offset = jnp.where(pattern_id == int(WhiteUFOPattern.DROP_RIGHT), 1, 0)
+        lane_offset = jnp.where(pattern_id == int(WhiteUFOPattern.DROP_LEFT), -1, lane_offset)
+        lane_offset = jnp.where(pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_RIGHT), 1, lane_offset)
+        lane_offset = jnp.where(pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_LEFT), -1, lane_offset)
+        target_lane_id = jnp.clip(closest_lane_id + lane_offset, 2, 4)
+
+        lane_vector = self._env.lane_vectors_t2b[target_lane_id]
+        target_lane_x = lane_x_at_y[target_lane_id]
+
+        is_retreat = pattern_id == int(WhiteUFOPattern.RETREAT)
+        is_move_back = pattern_id == int(WhiteUFOPattern.MOVE_BACK)
+        is_kamikaze = pattern_id == int(WhiteUFOPattern.KAMIKAZE)
+        is_triple = (pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_RIGHT)) | (pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_LEFT))
+
+        cross_track = target_lane_x - x
+        distance_to_lane = jnp.abs(cross_track)
+        direction = jnp.sign(cross_track)
+
+        def seek_lane(_):
+            attack_vx = jnp.where(direction == 0, 0.0, direction * 0.5)
+            retreat_vx = jnp.where(direction == 0, 0.0, direction * speed_factor * retreat_mult * 2.0)
+            new_vx = jnp.where(is_retreat | is_kamikaze | is_triple, retreat_vx, attack_vx)
+
+            normal_vy = 0.25
+            retreat_vy = -lane_vector[1] * speed_factor * retreat_mult
+            move_back_vy = -lane_vector[1] * speed_factor
+            kamikaze_vy = lane_vector[1] * speed_factor * retreat_mult
+            triple_vy = 0.25
+
+            new_vy = jnp.where(is_retreat, retreat_vy, normal_vy)
+            new_vy = jnp.where(is_move_back, move_back_vy, new_vy)
+            new_vy = jnp.where(is_kamikaze, kamikaze_vy, new_vy)
+            new_vy = jnp.where(is_triple, triple_vy, new_vy)
+            return new_vx, new_vy
+
+        def follow_lane(_):
+            normal_vx = lane_vector[0] * speed_factor
+            normal_vy = lane_vector[1] * speed_factor
+
+            retreat_vx = -lane_vector[0] * speed_factor * retreat_mult
+            retreat_vy = -lane_vector[1] * speed_factor * retreat_mult
+
+            move_back_vx = -lane_vector[0] * speed_factor
+            move_back_vy = -lane_vector[1] * speed_factor
+
+            kamikaze_vx = lane_vector[0] * speed_factor * retreat_mult
+            kamikaze_vy = lane_vector[1] * speed_factor * retreat_mult
+
+            triple_vy = 0.25
+
+            new_vx = jnp.where(is_retreat, retreat_vx, jnp.where(is_move_back, move_back_vx, normal_vx))
+            new_vx = jnp.where(is_kamikaze, kamikaze_vx, new_vx)
+
+            new_vy = jnp.where(is_retreat, retreat_vy, jnp.where(is_move_back, move_back_vy, normal_vy))
+            new_vy = jnp.where(is_kamikaze, kamikaze_vy, new_vy)
+            new_vy = jnp.where(is_triple, triple_vy, new_vy)
+            return new_vx, new_vy
+
+        return jax.lax.cond(distance_to_lane <= 0.25, follow_lane, seek_lane, operand=None)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _enemy_shot_step(self, state, white_ufo_pos, white_ufo_pattern_id, white_ufo_pattern_timer):
+        lane_vectors = self._env.lane_vectors_t2b
+        lanes_top_x = self._env.top_lanes_x
+        lane_dx_over_dy = self._env.lane_dx_over_dy
+
+        offscreen = self._env.bullet_offscreen_shots
+
+        shot_pos = state.level.enemy_shot_pos.astype(jnp.float32)
+        shot_lane = state.level.enemy_shot_vel.astype(jnp.int32)
+        shot_timer = state.level.enemy_shot_timer.astype(jnp.int32)
+
+        shot_active = shot_pos[1] <= float(self._env.consts.BOTTOM_CLIP)
+        shot_timer = jnp.where(shot_active, shot_timer + 1, 0)
+
+        shoot_duration = self._env.ufo_pattern_durations[int(WhiteUFOPattern.SHOOT)]
+        is_triple = (white_ufo_pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_RIGHT)) | (white_ufo_pattern_id == int(WhiteUFOPattern.TRIPLE_SHOT_LEFT))
+        shoot_now_triple = (white_ufo_pattern_timer >> 7) & 1
+
+        wants_spawn = (white_ufo_pattern_id == int(WhiteUFOPattern.SHOOT)) & (white_ufo_pattern_timer == shoot_duration)
+        wants_spawn = wants_spawn | (is_triple & (shoot_now_triple == 1))
+
+        ufo_on_screen = white_ufo_pos[1] <= float(self._env.consts.BOTTOM_CLIP)
+        ufo_not_on_top_lane = white_ufo_pos[1] > float(self._env.consts.TOP_CLIP)
+        ufo_x = white_ufo_pos[0].astype(jnp.float32)
+        ufo_y = white_ufo_pos[1].astype(jnp.float32)
+
+        lane_x_at_ufo_y = lanes_top_x[:, None] + lane_dx_over_dy[:, None] * (ufo_y[None, :] - float(self._env.consts.TOP_CLIP))
+        raw_closest_lane = jnp.argmin(jnp.abs(lane_x_at_ufo_y - ufo_x[None, :]), axis=0).astype(jnp.int32)
+        closest_lane = _canonical_three_lane_ufo_lane(raw_closest_lane)
+        allowed_shot_lane = _is_three_lane_shootable(closest_lane)
+
+        ufo_shot_active = jnp.reshape(shot_active, (3, 3))
+        first_inactive_slot = jnp.argmax(jnp.logical_not(ufo_shot_active), axis=1)
+        has_inactive_slot = jnp.any(jnp.logical_not(ufo_shot_active), axis=1)
+
+        can_shoot = (state.steps > 2000) | state.ufo_killed
+        spawn = jnp.logical_and.reduce(
+            jnp.array(
+                [
+                    wants_spawn,
+                    ufo_on_screen,
+                    ufo_not_on_top_lane,
+                    allowed_shot_lane,
+                    has_inactive_slot,
+                ]
+            )
+        ) & can_shoot
+
+        spawn_y = jnp.clip(ufo_y + 4.0, float(self._env.consts.TOP_CLIP), float(self._env.consts.BOTTOM_CLIP))
+        spawn_x = jnp.take(lanes_top_x, closest_lane) + jnp.take(lane_dx_over_dy, closest_lane) * (
+            spawn_y - float(self._env.consts.TOP_CLIP)
+        )
+
+        spawn_slots = jnp.arange(3) * 3 + first_inactive_slot
+        spawn_mask = (jax.nn.one_hot(spawn_slots, 9) * spawn[:, None]).sum(axis=0).astype(jnp.bool_)
+
+        spawn_x_expanded = jnp.repeat(spawn_x, 3)
+        spawn_y_expanded = jnp.repeat(spawn_y, 3)
+        spawn_pos_expanded = jnp.stack([spawn_x_expanded, spawn_y_expanded])
+
+        shot_pos = jnp.where(spawn_mask[None, :], spawn_pos_expanded, shot_pos)
+
+        closest_lane_expanded = jnp.repeat(closest_lane, 3)
+        shot_lane = jnp.where(spawn_mask, closest_lane_expanded, shot_lane)
+        shot_timer = jnp.where(spawn_mask, 0, shot_timer)
+        shot_active = jnp.logical_or(shot_active, spawn_mask)
+
+        should_move = shot_active & ((shot_timer % 4) == 2)
+        speed = float(self._env.consts.WHITE_UFO_SHOT_SPEED_FACTOR)
+        lane_dy = jnp.take(lane_vectors[:, 1], shot_lane)
+        y_after = shot_pos[1] + jnp.where(should_move, lane_dy * speed, 0.0)
+        x_after = jnp.take(lanes_top_x, shot_lane) + jnp.take(lane_dx_over_dy, shot_lane) * (
+            y_after - float(self._env.consts.TOP_CLIP)
+        )
+        shot_pos = jnp.where(shot_active, jnp.stack([x_after, y_after]), shot_pos)
+
+        moved_offscreen = shot_pos[1] > float(self._env.consts.BOTTOM_CLIP)
+        shot_pos = jnp.where(moved_offscreen, offscreen, shot_pos)
+        shot_timer = jnp.where(moved_offscreen, 0, shot_timer)
+        shot_active = shot_active & (~moved_offscreen)
+
+        player_left = state.level.player_pos.astype(jnp.float32)
+        player_y = float(self._env.consts.PLAYER_POS_Y)
+        player_size = self._env.player_sprite_size
+
+        shot_x = shot_pos[0] + _get_ufo_alignment(shot_pos[1])
+        shot_y = shot_pos[1]
+
+        sprite_idx = (jnp.floor_divide(shot_timer, 4) % 2).astype(jnp.int32)
+        shot_sizes = jnp.take(self._env.enemy_shot_sprite_sizes, sprite_idx, axis=0)
+
+        hits = (
+            shot_active
+            & (shot_x < player_left + player_size[1])
+            & (player_left < shot_x + shot_sizes[:, 1])
+            & (shot_y < player_y + player_size[0])
+            & (player_y < shot_y + shot_sizes[:, 0])
+        )
+
+        hit_count = jnp.sum(hits, dtype=jnp.int32)
+        shot_pos = jnp.where(hits[None, :], offscreen, shot_pos)
+        shot_timer = jnp.where(hits, 0, shot_timer)
+        return shot_pos, shot_lane, shot_timer, hit_count
 
 
 class SameEnemiesMod(JaxAtariInternalModPlugin):
