@@ -93,6 +93,47 @@ THREE_LANE_BOTTOM_TO_TOP = jnp.array(
 )
 THREE_LANE_LEFT_BOUND = 71.0
 THREE_LANE_RIGHT_BOUND = 91.0
+THREE_LANE_BACKGROUND_BLUE_RGB = (45, 109, 152)
+THREE_LANE_BACKGROUND_HORIZON_Y = 45
+THREE_LANE_GUIDE_MARKER_SIZE = jnp.array([[2, 1]], dtype=jnp.int32)
+# Preserve the stock center-three background guide markers exactly; the mod
+# only removes the outer lanes visually.
+THREE_LANE_GUIDE_POSITIONS = jnp.array(
+    [
+        (72, 53),
+        (70, 67),
+        (68, 81),
+        (66, 95),
+        (65, 109),
+        (63, 119),
+        (62, 129),
+        (61, 139),
+        (60, 149),
+        (58, 159),
+        (83, 55),
+        (83, 69),
+        (83, 83),
+        (83, 97),
+        (83, 111),
+        (83, 121),
+        (83, 131),
+        (83, 141),
+        (83, 151),
+        (83, 161),
+        (94, 51),
+        (96, 65),
+        (98, 79),
+        (99, 93),
+        (101, 107),
+        (102, 117),
+        (104, 127),
+        (105, 137),
+        (106, 147),
+        (107, 157),
+    ],
+    dtype=jnp.int32,
+)
+THREE_LANE_GUIDE_SIZES = jnp.tile(THREE_LANE_GUIDE_MARKER_SIZE, (THREE_LANE_GUIDE_POSITIONS.shape[0], 1))
 
 
 def _get_lane_x(env, lane, y_pos):
@@ -251,6 +292,23 @@ class ThreeLanesMod(JaxAtariInternalModPlugin):
         "lane_dx_over_dy": THREE_LANE_TOP_TO_BOTTOM[:, 0] / THREE_LANE_TOP_TO_BOTTOM[:, 1],
         "middle_lane_spawn": THREE_LANE_TOP_IDS,
     }
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _render_colored_background(self, raster, state):
+        renderer = self._env.renderer
+        raster = type(renderer)._render_colored_background(renderer, raster, state)
+
+        blue_id = renderer.COLOR_TO_ID[THREE_LANE_BACKGROUND_BLUE_RGB]
+        clear_mask = (renderer.jr._yy > THREE_LANE_BACKGROUND_HORIZON_Y) & (raster == blue_id)
+        row_background = raster[:, :1]
+        raster = jnp.where(clear_mask, row_background, raster)
+
+        return renderer.jr.draw_rects(
+            raster,
+            THREE_LANE_GUIDE_POSITIONS,
+            THREE_LANE_GUIDE_SIZES,
+            blue_id,
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def _white_ufo_choose_pattern(

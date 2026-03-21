@@ -3,6 +3,7 @@ import jax.numpy as jnp
 
 from jaxatari.core import make
 from jaxatari.games.jax_beamrider import BouncerState, LaneBlockerState, WhiteUFOPattern
+from jaxatari.games.mods.beamrider.beamrider_mod_plugins import THREE_LANE_GUIDE_POSITIONS
 
 
 def _get_base_env(env):
@@ -49,6 +50,41 @@ def test_beamrider_three_lanes_mod_enemy_shots_stay_on_center_track():
     assert int(jnp.sum(active)) == 3
     assert int(hit_count) == 0
     assert bool(jnp.all(shot_timer_out[active] == 0))
+
+
+def test_beamrider_three_lanes_mod_preserves_original_center_guide_markers():
+    assert tuple(map(tuple, THREE_LANE_GUIDE_POSITIONS.tolist())) == (
+        (72, 53),
+        (70, 67),
+        (68, 81),
+        (66, 95),
+        (65, 109),
+        (63, 119),
+        (62, 129),
+        (61, 139),
+        (60, 149),
+        (58, 159),
+        (83, 55),
+        (83, 69),
+        (83, 83),
+        (83, 97),
+        (83, 111),
+        (83, 121),
+        (83, 131),
+        (83, 141),
+        (83, 151),
+        (83, 161),
+        (94, 51),
+        (96, 65),
+        (98, 79),
+        (99, 93),
+        (101, 107),
+        (102, 117),
+        (104, 127),
+        (105, 137),
+        (106, 147),
+        (107, 157),
+    )
 
 
 def test_beamrider_three_lanes_mod_full_step_handles_all_enemy_types():
