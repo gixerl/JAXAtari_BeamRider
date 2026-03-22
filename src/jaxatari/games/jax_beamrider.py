@@ -577,6 +577,18 @@ class BeamriderObservation(NamedTuple):
 
     # game state
     lives: chex.Array
+    sector: chex.Array
+    shooting_delay: chex.Array
+    bullet_type: chex.Array
+    shot_type_pending: chex.Array
+    standby_phase: chex.Array
+    death_timer: chex.Array
+    white_ufo_pattern_id: chex.Array
+    white_ufo_pattern_timer: chex.Array
+    mothership_position: chex.Array
+    mothership_timer: chex.Array
+    mothership_stage: chex.Array
+    rejuvenator_dead: chex.Array
 
 class WhiteUFOUpdate(NamedTuple):
     """Aggregated quantities needed after updating all white UFOs."""
@@ -598,7 +610,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
         self.consts = consts or BeamriderConstants()
         self.key = jax.random.PRNGKey(42067)
         self.renderer = BeamriderRenderer(self.consts)
-        self.obs_size = 105
+        self.obs_size = 121
         self.action_set = [
             Action.NOOP,
             Action.FIRE,
@@ -912,6 +924,18 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             kamikaze_pos=level.kamikaze_pos,
             kamikaze_active=level.kamikaze_active,
             lives=state.lives,
+            sector=state.sector,
+            shooting_delay=level.shooting_delay,
+            bullet_type=level.bullet_type,
+            shot_type_pending=level.shot_type_pending,
+            standby_phase=level.standby_phase,
+            death_timer=level.death_timer,
+            white_ufo_pattern_id=jnp.where(is_init, 0, level.white_ufo_pattern_id),
+            white_ufo_pattern_timer=jnp.where(is_init, 0, level.white_ufo_pattern_timer),
+            mothership_position=level.mothership_position,
+            mothership_timer=level.mothership_timer,
+            mothership_stage=level.mothership_stage,
+            rejuvenator_dead=level.rejuvenator_dead,
         )
 
     def _bouncer_bullet_collision(
@@ -3977,6 +4001,18 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             "kamikaze_pos": spaces.Box(low=-100.0, high=255.0, shape=(2, 1), dtype=jnp.float32),
             "kamikaze_active": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=jnp.float32),
             "lives": spaces.Box(low=0.0, high=255.0, shape=(), dtype=jnp.float32),
+            "sector": spaces.Box(low=1.0, high=15.0, shape=(), dtype=jnp.float32),
+            "shooting_delay": spaces.Box(low=0.0, high=255.0, shape=(), dtype=jnp.float32),
+            "bullet_type": spaces.Box(low=0.0, high=2.0, shape=(), dtype=jnp.float32),
+            "shot_type_pending": spaces.Box(low=0.0, high=2.0, shape=(), dtype=jnp.float32),
+            "standby_phase": spaces.Box(low=0.0, high=3.0, shape=(), dtype=jnp.float32),
+            "death_timer": spaces.Box(low=0.0, high=120.0, shape=(), dtype=jnp.float32),
+            "white_ufo_pattern_id": spaces.Box(low=0.0, high=9.0, shape=(3,), dtype=jnp.float32),
+            "white_ufo_pattern_timer": spaces.Box(low=0.0, high=255.0, shape=(3,), dtype=jnp.float32),
+            "mothership_position": spaces.Box(low=0.0, high=500.0, shape=(), dtype=jnp.float32),
+            "mothership_timer": spaces.Box(low=0.0, high=255.0, shape=(), dtype=jnp.float32),
+            "mothership_stage": spaces.Box(low=0.0, high=5.0, shape=(), dtype=jnp.float32),
+            "rejuvenator_dead": spaces.Box(low=0.0, high=1.0, shape=(), dtype=jnp.float32),
         })
 
     def image_space(self) -> spaces.Box:
@@ -4011,6 +4047,18 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             obs.kamikaze_pos.flatten(),
             obs.kamikaze_active.flatten(),
             obs.lives.flatten(),
+            obs.sector.flatten(),
+            obs.shooting_delay.flatten(),
+            obs.bullet_type.flatten(),
+            obs.shot_type_pending.flatten(),
+            obs.standby_phase.flatten(),
+            obs.death_timer.flatten(),
+            obs.white_ufo_pattern_id.flatten(),
+            obs.white_ufo_pattern_timer.flatten(),
+            obs.mothership_position.flatten(),
+            obs.mothership_timer.flatten(),
+            obs.mothership_stage.flatten(),
+            obs.rejuvenator_dead.flatten(),
         ])
 
 class BeamriderRenderer(JAXGameRenderer):
