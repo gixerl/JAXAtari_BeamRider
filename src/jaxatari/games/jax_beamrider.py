@@ -4062,15 +4062,20 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
         ])
 
 class BeamriderRenderer(JAXGameRenderer):
-    def __init__(self, consts=None):
-        super().__init__()
+    def __init__(self, consts=None, config: render_utils.RendererConfig = None):
         self.consts = consts or BeamriderConstants()
-        self.rendering_config = render_utils.RendererConfig(
-            game_dimensions=(210, 160),
-            channels=3,
-        )
+        super().__init__(self.consts, config)
+        
+        # Use injected config if provided, else default
+        if config is None:
+            self.config = render_utils.RendererConfig(
+                game_dimensions=(210, 160),
+                channels=3,
+            )
+        else:
+            self.config = config
 
-        self.jr = render_utils.JaxRenderingUtils(self.rendering_config)
+        self.jr = render_utils.JaxRenderingUtils(self.config)
 
         # 1. Create procedural assets:
         # background_sprite = self._create_background_sprite()
@@ -4761,8 +4766,10 @@ class BeamriderRenderer(JAXGameRenderer):
 
         def render_clipping(r, num_lines):
             # Clip the mask to only show top num_lines
-            y_indices = jnp.arange(self.consts.MOTHERSHIP_HEIGHT)[:, None]
-            active_rows = y_indices < num_lines
+            h, w = mask.shape
+            y_indices = jnp.arange(h)[:, None]
+            # Scale num_lines to match the current mask height
+            active_rows = y_indices * self.consts.MOTHERSHIP_HEIGHT < num_lines * h
             effective_mask = jnp.where(active_rows, mask, self.jr.TRANSPARENT_ID)
             y = self.consts.MOTHERSHIP_EMERGE_Y - num_lines
             return self.jr.render_at_clipped(r, pos_x, y, effective_mask)
