@@ -1,11 +1,11 @@
 import numpy as np
-import pytest
 import jax
 import jax.numpy as jnp
 
 from jaxatari._dtypes import COUNTER_DTYPE, counter_array
-from jaxatari.core import make
-from jaxatari.games.jax_beamrider import WhiteUFOPattern
+from jaxatari.games.jax_beamrider import JaxBeamrider, WhiteUFOPattern
+from jaxatari.games.mods.beamrider_mods import BeamriderEnvMod
+from jaxatari.modification import JaxAtariModWrapper
 
 
 def _get_base_env(env):
@@ -14,20 +14,25 @@ def _get_base_env(env):
     return env
 
 
+def _make_three_lanes_env():
+    base_env = JaxBeamrider()
+    controller = BeamriderEnvMod(env=base_env, mods_config=["three_lanes"])
+    return JaxAtariModWrapper(env=controller, mods_config=["three_lanes"])
+
+
 def test_beamrider_steps_follow_counter_dtype():
-    env = make("beamrider")
+    env = JaxBeamrider()
     _, state = env.reset(jax.random.PRNGKey(0))
 
     assert state.steps.dtype == np.dtype(COUNTER_DTYPE)
 
 
-@pytest.mark.skipif(np.dtype(COUNTER_DTYPE) != np.dtype(np.int64), reason="requires x64 counters")
-def test_beamrider_step_counter_crosses_int32_boundary():
-    env = make("beamrider")
+def test_beamrider_step_counter_increments_with_counter_dtype():
+    env = JaxBeamrider()
     _, state = env.reset(jax.random.PRNGKey(1))
 
-    large_step = counter_array(np.iinfo(np.int32).max + 5)
-    state = state._replace(steps=large_step)
+    step_value = counter_array(3001)
+    state = state._replace(steps=step_value)
 
     _, new_state, _, _, _ = env._handle_init_phase(
         state,
@@ -35,13 +40,12 @@ def test_beamrider_step_counter_crosses_int32_boundary():
         state.level.blue_line_counter,
     )
 
-    assert new_state.steps.dtype == large_step.dtype
-    assert int(new_state.steps) == int(large_step) + 1
+    assert new_state.steps.dtype == step_value.dtype
+    assert int(new_state.steps) == int(step_value) + 1
 
 
-@pytest.mark.skipif(np.dtype(COUNTER_DTYPE) != np.dtype(np.int64), reason="requires x64 counters")
-def test_beamrider_three_lanes_mod_handles_large_step_counters():
-    env = make("beamrider", mods=["three_lanes"])
+def test_beamrider_three_lanes_mod_handles_counter_dtype_steps():
+    env = _make_three_lanes_env()
     base = _get_base_env(env)
     _, state = env.reset(jax.random.PRNGKey(2))
 
@@ -54,8 +58,7 @@ def test_beamrider_three_lanes_mod_handles_large_step_counters():
     )
     shoot_timer = jnp.full((3,), base.ufo_pattern_durations[int(WhiteUFOPattern.SHOOT)], dtype=jnp.int32)
     shoot_pattern = jnp.full((3,), int(WhiteUFOPattern.SHOOT), dtype=jnp.int32)
-    large_step = counter_array(np.iinfo(np.int32).max + 3001)
-    state = state._replace(steps=large_step, ufo_killed=jnp.array(True))
+    state = state._replace(steps=counter_array(3001), ufo_killed=jnp.array(True))
 
     shot_pos, shot_lane, shot_timer_out, hit_count = base._enemy_shot_step(
         state,

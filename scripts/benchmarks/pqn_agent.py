@@ -9,7 +9,6 @@ from struct import unpack
 import threading
 import time
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 from functools import partial
@@ -21,7 +20,6 @@ import optax
 import flax.linen as nn
 from flax.training.train_state import TrainState
 from flax.core.frozen_dict import FrozenDict
-from jaxatari._dtypes import counter_array
 from jaxatari.wrappers import AtariWrapper, MultiRewardWrapper, PixelObsWrapper, FlattenObservationWrapper, LogWrapper, ObjectCentricWrapper, NormalizeObservationWrapper, MultiRewardWrapper, MultiRewardLogWrapper
 import hydra
 from omegaconf import OmegaConf
@@ -126,7 +124,6 @@ class Transition:
 
 class CustomTrainState(TrainState):
     batch_stats: Any
-    timesteps: int = 0
     n_updates: int = 0
     grad_steps: int = 0
 
@@ -237,11 +234,6 @@ def make_train(config):
                 batch_stats=network_variables["batch_stats"],
                 tx=tx,
             )
-            train_state = train_state.replace(
-                timesteps=counter_array(0),
-                n_updates=counter_array(0),
-                grad_steps=counter_array(0),
-            )
             return train_state
 
         rng, _rng = jax.random.split(rng)
@@ -291,11 +283,6 @@ def make_train(config):
                 config["NUM_STEPS"],
             )
             expl_state = tuple(expl_state)
-
-            train_state = train_state.replace(
-                timesteps=train_state.timesteps
-                + config["NUM_STEPS"] * config["NUM_ENVS"]
-            )  # update timesteps count
 
             last_q = network.apply(
                 {
@@ -401,7 +388,6 @@ def make_train(config):
 
             train_state = train_state.replace(n_updates=train_state.n_updates + 1)
             metrics = {
-                "env_step": train_state.timesteps,
                 "update_steps": train_state.n_updates,
                 "grad_steps": train_state.grad_steps,
                 "td_loss": loss.mean(),
@@ -437,15 +423,15 @@ def make_train(config):
             if config["WANDB_MODE"] != "disabled":
 
                 def callback(metrics, original_rng):
+                    metrics = dict(metrics)
+                    env_step = int(metrics["update_steps"]) * config["NUM_STEPS"] * config["NUM_ENVS"]
+                    metrics["env_step"] = env_step
                     if config.get("WANDB_LOG_ALL_SEEDS", False):
-                        metrics.update(
-                            {
-                                f"rng{int(original_rng)}/{k}": v
-                                for k, v in metrics.items()
-                            }
-                        )
-                    # wandb.log(metrics, step=metrics["update_steps"])
-                    wandb.log(metrics, step=metrics["env_step"])
+                        metrics = {
+                            f"rng{int(original_rng)}/{k}": v
+                            for k, v in metrics.items()
+                        }
+                    wandb.log(metrics, step=env_step)
 
                 jax.debug.callback(callback, metrics, original_rng)
 
