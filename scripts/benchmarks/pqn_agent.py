@@ -128,6 +128,24 @@ class CustomTrainState(TrainState):
     grad_steps: int = 0
 
 
+def _unwrap_core_env(env):
+    """Return the base environment that owns the active renderer."""
+    core_env = env
+    while hasattr(core_env, "_env"):
+        core_env = core_env._env
+    return core_env
+
+
+def _unwrap_render_state(state):
+    """Strip wrapper state layers until the raw environment state remains."""
+    render_state = state
+    while hasattr(render_state, "atari_state"):
+        render_state = render_state.atari_state
+    while hasattr(render_state, "env_state"):
+        render_state = render_state.env_state
+    return render_state
+
+
 def make_train(config):
 
     config["NUM_UPDATES"] = (
@@ -154,7 +172,6 @@ def make_train(config):
     # Training env: base env or env with TRAIN_MODS.
     env = jaxatari.make(config["ENV_NAME"].lower(), mods=train_mods_list)
     mod_env = env
-    renderer = mod_env.renderer
 
     def apply_wrappers(env):
         env = AtariWrapper(env, episodic_life=True, frame_skip=4, frame_stack_size=4, sticky_actions=True, max_pooling=True, clip_reward=True, noop_reset=30, max_episode_length=18000)
@@ -524,7 +541,6 @@ def make_train(config):
 def _generate_single_final_video(config, params, batch_stats, seed_idx, mods_config, video_label, video_index=0):
     """Generate a single video for the given mod configuration and log it to wandb."""
     env = jaxatari.make(config["ENV_NAME"].lower(), mods=mods_config)
-    renderer = env.renderer
 
     # Apply wrappers
     env = AtariWrapper(env, episodic_life=True, frame_skip=4, frame_stack_size=4, sticky_actions=True, max_pooling=True, clip_reward=False, noop_reset=30, max_episode_length=18000)
@@ -539,6 +555,9 @@ def _generate_single_final_video(config, params, batch_stats, seed_idx, mods_con
         env = PixelObsWrapper(env, do_pixel_resize=do_resize, pixel_resize_shape=resize_shape, grayscale=grayscale, use_native_downscaling=use_native_downscaling)
     env = NormalizeObservationWrapper(env)
     env = LogWrapper(env)
+    # Native downscaling hot-swaps the core renderer inside PixelObsWrapper, so
+    # the renderer must be resolved after all wrappers are applied.
+    renderer = _unwrap_core_env(env).renderer
 
     # Create network
     network = QNetwork(
@@ -584,11 +603,7 @@ def _generate_single_final_video(config, params, batch_stats, seed_idx, mods_con
         total_reward += float(reward)
 
         # Render frame (get state for rendering)
-        state_for_render = env_state
-        while hasattr(state_for_render, 'atari_state'):
-            state_for_render = state_for_render.atari_state
-        if hasattr(state_for_render, 'env_state'):
-            state_for_render = state_for_render.env_state
+        state_for_render = _unwrap_render_state(env_state)
 
         frame = renderer.render(state_for_render)
         frames.append(np.array(frame, dtype=np.uint8))
