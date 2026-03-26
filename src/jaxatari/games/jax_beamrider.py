@@ -9,6 +9,7 @@ import jax.lax
 import jax.numpy as jnp
 
 import jaxatari.spaces as spaces
+from jaxatari._dtypes import counter_array
 
 from jaxatari.environment import JAXAtariAction as Action, JaxEnvironment
 from jaxatari.renderers import JAXGameRenderer
@@ -884,7 +885,7 @@ class JaxBeamrider(JaxEnvironment[BeamriderState, BeamriderObservation, Beamride
             level_finished=jnp.array(0),
             reset_coords=jnp.array(False),
             lives=jnp.array(self.consts.STARTING_LIVES, dtype=jnp.int32),
-            steps=jnp.array(0),
+            steps=counter_array(0),
             ufo_killed=jnp.array(False),
             rng=key,
         )

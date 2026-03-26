@@ -12,6 +12,7 @@ import jax
 import jax.image as jim
 import jax.numpy as jnp
 from jax import flatten_util
+from jaxatari._dtypes import counter_array
 from jaxatari.environment import EnvState, JAXAtariAction as Action
 import jaxatari.spaces as spaces
 import numpy as np
@@ -132,7 +133,7 @@ class AtariWrapper(JaxatariWrapper):
         # Split keys for all potential random operations
         env_key, wrapper_key, noop_key = jax.random.split(key, 3)
         obs, env_state = self._env.reset(env_key)
-        step = jnp.array(0, dtype=jnp.int32)
+        step = counter_array(0)
         prev_action = jnp.array(0, dtype=jnp.int32)
 
         # TODO: in which order should the noop and first_fire be done?
@@ -263,7 +264,7 @@ class AtariWrapper(JaxatariWrapper):
         
         def _softreset_fn(_):
             # When just done (not real_done, episodic_life) we keep the env_state but reset the step counter
-            next_state = AtariState(new_env_state, next_state_key, 0, new_action, new_obs_stack)
+            next_state = AtariState(new_env_state, next_state_key, counter_array(0), new_action, new_obs_stack)
             return new_obs_stack, next_state
 
         def _step_fn(_):
@@ -841,7 +842,7 @@ class LogWrapper(JaxatariWrapper):
         self, key: chex.PRNGKey
     ) -> Tuple[chex.Array, LogState]:
         obs, atari_state = self._env.reset(key)
-        state = LogState(atari_state, 0.0, 0, 0.0, 0)
+        state = LogState(atari_state, 0.0, counter_array(0), 0.0, counter_array(0))
         return obs, state
 
     @functools.partial(jax.jit, static_argnums=(0,))
@@ -858,12 +859,12 @@ class LogWrapper(JaxatariWrapper):
         state = LogState(
             atari_state=atari_state,
             episode_returns=jnp.where(done_, jnp.float32(0), jnp.float32(new_episode_return)),
-            episode_lengths=jnp.where(done_, jnp.int32(0), jnp.int32(new_episode_length)),
+            episode_lengths=jnp.where(done_, counter_array(0), counter_array(new_episode_length)),
             returned_episode_returns=jnp.where(
                 done_, jnp.float32(new_episode_return), jnp.float32(state.returned_episode_returns)
             ),
             returned_episode_lengths=jnp.where(
-                done_, jnp.int32(new_episode_length), jnp.int32(state.returned_episode_lengths)
+                done_, counter_array(new_episode_length), counter_array(state.returned_episode_lengths)
             ),
         )
         info["returned_episode_returns"] = state.returned_episode_returns
@@ -896,7 +897,15 @@ class MultiRewardLogWrapper(JaxatariWrapper):
         _, _, _, _, dummy_info = self._env.step(atari_state, 0)
         rewards_shape_provider = dummy_info.get("all_rewards", jnp.zeros(1))
         episode_returns_init = jnp.zeros_like(rewards_shape_provider)
-        state = MultiRewardLogState(atari_state, 0.0, episode_returns_init, 0, 0.0, episode_returns_init, 0)
+        state = MultiRewardLogState(
+            atari_state,
+            0.0,
+            episode_returns_init,
+            counter_array(0),
+            0.0,
+            episode_returns_init,
+            counter_array(0),
+        )
         return obs, state
 
     @functools.partial(jax.jit, static_argnums=(0,))
@@ -915,7 +924,7 @@ class MultiRewardLogWrapper(JaxatariWrapper):
             atari_state=atari_state,
             episode_returns_env=jnp.where(done_, jnp.float32(0), jnp.float32(new_episode_return_env)),
             episode_returns=jnp.where(done_, jnp.zeros_like(state.episode_returns), new_episode_return),
-            episode_lengths=jnp.where(done_, jnp.int32(0), jnp.int32(new_episode_length)),
+            episode_lengths=jnp.where(done_, counter_array(0), counter_array(new_episode_length)),
             returned_episode_returns_env=jnp.where(
                 done_, jnp.float32(new_episode_return_env), jnp.float32(state.returned_episode_returns_env)
             ),
@@ -923,7 +932,7 @@ class MultiRewardLogWrapper(JaxatariWrapper):
                 done_, new_episode_return, state.returned_episode_returns
             ),
             returned_episode_lengths=jnp.where(
-                done_, jnp.int32(new_episode_length), jnp.int32(state.returned_episode_lengths)
+                done_, counter_array(new_episode_length), counter_array(state.returned_episode_lengths)
             ),
         )
         info["returned_episode_env_returns"] = state.returned_episode_returns_env

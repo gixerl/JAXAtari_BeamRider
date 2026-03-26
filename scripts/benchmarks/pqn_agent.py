@@ -9,6 +9,7 @@ from struct import unpack
 import threading
 import time
 import jax
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 from functools import partial
@@ -20,6 +21,7 @@ import optax
 import flax.linen as nn
 from flax.training.train_state import TrainState
 from flax.core.frozen_dict import FrozenDict
+from jaxatari._dtypes import counter_array
 from jaxatari.wrappers import AtariWrapper, MultiRewardWrapper, PixelObsWrapper, FlattenObservationWrapper, LogWrapper, ObjectCentricWrapper, NormalizeObservationWrapper, MultiRewardWrapper, MultiRewardLogWrapper
 import hydra
 from omegaconf import OmegaConf
@@ -234,6 +236,11 @@ def make_train(config):
                 params=network_variables["params"],
                 batch_stats=network_variables["batch_stats"],
                 tx=tx,
+            )
+            train_state = train_state.replace(
+                timesteps=counter_array(0),
+                n_updates=counter_array(0),
+                grad_steps=counter_array(0),
             )
             return train_state
 

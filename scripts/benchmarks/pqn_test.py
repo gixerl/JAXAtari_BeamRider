@@ -5,6 +5,7 @@ Adapted from https://github.com/mttga/purejaxql/blob/main/purejaxql/pqn_gymnax.p
 import os
 import time
 import jax
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from functools import partial
 from typing import Any
@@ -14,6 +15,7 @@ import chex
 import optax
 import flax.linen as nn
 from flax.training.train_state import TrainState
+from jaxatari._dtypes import counter_array
 from jaxatari.wrappers import AtariWrapper, PixelObsWrapper, FlattenObservationWrapper, LogWrapper, ObjectCentricWrapper, NormalizeObservationWrapper
 import hydra
 from omegaconf import OmegaConf
@@ -222,6 +224,11 @@ def make_test(config, save_params, batch_stats):
                 params=params,
                 batch_stats=batch_sts,
                 tx=tx,
+            )
+            train_state = train_state.replace(
+                timesteps=counter_array(0),
+                n_updates=counter_array(0),
+                grad_steps=counter_array(0),
             )
             return train_state
 
